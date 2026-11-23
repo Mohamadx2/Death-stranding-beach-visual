@@ -1,0 +1,6 @@
+{
+  "name": "The Seam — Volcanic Beach",
+  "description": "An atmospheric 3D third-person exploration of a desolate black volcanic sand beach with an articulated drifter character, rolling dark surf, stranded leviathans, and procedural coastal soundscape.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
