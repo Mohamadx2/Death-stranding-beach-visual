@@ -11,12 +11,14 @@ import {
   SceneTelemetry,
 } from './scene/BeachExperience';
 import { AtmospherePresetId } from './scene/materials';
+import { WeatherMode } from './scene/weather';
 
 export default function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const experienceRef = useRef<BeachExperience | null>(null);
 
   const [preset, setPreset] = useState<AtmospherePresetId>('ash');
+  const [weatherMode, setWeatherMode] = useState<WeatherMode>('auto');
   const [cameraMode, setCameraMode] = useState<CameraMode>('shoulder');
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [contextLost, setContextLost] = useState(false);
@@ -27,6 +29,30 @@ export default function App() {
     headingDeg: 180,
     speed: 0,
     isWading: false,
+    stamina: 100,
+    staminaExhausted: false,
+    staminaCooldownRemaining: 0,
+    playableRadius: 210,
+    boundaryHit: false,
+    weather: {
+      mode: 'auto',
+      active: 'clear',
+      target: 'clear',
+      transitioning: false,
+    },
+    cargo: {
+      total: 8,
+      carried: 0,
+      maxCarry: 6,
+      delivered: 0,
+      carriedWeightKg: 0,
+      nearbyCargoLabel: null,
+      nearbyCargoWeightKg: null,
+      backpackFull: false,
+      nearDeliveryPost: false,
+      deliveryPostPos: { x: 14, z: 36 },
+      worldCargos: [],
+    },
   });
 
   useEffect(() => {
@@ -51,6 +77,11 @@ export default function App() {
     experienceRef.current?.setAtmosphere(next);
   }, []);
 
+  const handleSelectWeather = useCallback((next: WeatherMode) => {
+    setWeatherMode(next);
+    experienceRef.current?.setWeatherMode(next);
+  }, []);
+
   const handleSelectCamera = useCallback((mode: CameraMode) => {
     setCameraMode(mode);
     experienceRef.current?.setCameraMode(mode);
@@ -64,6 +95,14 @@ export default function App() {
     if (!experienceRef.current) return;
     const enabled = experienceRef.current.toggleAudio();
     setAudioEnabled(enabled);
+  }, []);
+
+  const handleInteractCargo = useCallback(() => {
+    experienceRef.current?.interactCargo();
+  }, []);
+
+  const handleResetCargoRun = useCallback(() => {
+    experienceRef.current?.resetCargoRun();
   }, []);
 
   const handleTouchMove = useCallback((x: number, y: number) => {
@@ -80,13 +119,17 @@ export default function App() {
       <ControlOverlay
         telemetry={telemetry}
         preset={preset}
+        weatherMode={weatherMode}
         cameraMode={cameraMode}
         audioEnabled={audioEnabled}
         contextLost={contextLost}
         onSelectPreset={handleSelectPreset}
+        onSelectWeather={handleSelectWeather}
         onSelectCamera={handleSelectCamera}
         onTriggerScan={handleTriggerScan}
         onToggleAudio={handleToggleAudio}
+        onInteractCargo={handleInteractCargo}
+        onResetCargoRun={handleResetCargoRun}
         onTouchMove={handleTouchMove}
         onJump={handleJump}
       />

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 export const SEA_LEVEL = 0.0;
-export const BEACH_PLAYABLE_RADIUS = 135;
+export const BEACH_PLAYABLE_RADIUS = 210;
 
 export interface ObstacleCollider {
   x: number;
@@ -9,58 +9,70 @@ export interface ObstacleCollider {
   radius: number;
 }
 
+export interface BoundaryImpact {
+  hit: boolean;
+  x: number;
+  z: number;
+  nx: number;
+  nz: number;
+}
+
 /**
  * Deterministic shoreline curve:
  * -z goes toward the open dark ocean
- * +z rises gently into black volcanic dunes and basalt cliffs
+ * +z rises into black volcanic dunes, grassy hollows, and mossy small hills
  */
 export function shorelineZAt(x: number): number {
   return (
-    Math.sin(x * 0.022) * 7.5 +
-    Math.cos(x * 0.058 + 1.1) * 3.2 +
-    Math.sin(x * 0.009 - 0.5) * 11.0
+    Math.sin(x * 0.018) * 9.5 +
+    Math.cos(x * 0.045 + 1.1) * 4.2 +
+    Math.sin(x * 0.008 - 0.5) * 13.0
   );
 }
 
 /**
- * Analytical terrain heightfield for the volcanic beach.
- * Ensures smooth, realistic shore slope, tidal sandbars, and rising basalt dunes.
+ * Analytical terrain heightfield for the expanded volcanic & mossy coastal topography.
  */
 export function groundHeightAt(x: number, z: number): number {
   const shoreZ = shorelineZAt(x);
   const distFromShore = z - shoreZ;
 
-  // Base slope from seabed (-z) up onto dry beach (+z)
   let h = 0;
   if (distFromShore < 0) {
     // Gradual shallow shelf into deeper dark ocean
-    const shallow = Math.tanh(distFromShore * 0.055) * 1.8;
+    const shallow = Math.tanh(distFromShore * 0.05) * 1.9;
     const shelfRipple =
       Math.sin(x * 0.14 + z * 0.18) * 0.08 +
       Math.cos(x * 0.07 - z * 0.11) * 0.12;
     h = shallow + shelfRipple * Math.min(1, Math.abs(distFromShore) * 0.05);
   } else {
-    // Smooth tidal berm then rolling black sand dunes
-    const berm = Math.tanh(distFromShore * 0.045) * 1.45;
-    const upperRise = Math.max(0, distFromShore - 28) * 0.085;
-    const duneWave =
-      (Math.sin(x * 0.036 + z * 0.028) * 0.65 +
-        Math.cos(x * 0.082 - z * 0.064) * 0.28 +
-        Math.sin(x * 0.17 + z * 0.13) * 0.08) *
-      THREE.MathUtils.smoothstep(distFromShore, 4, 34);
-    h = berm + upperRise + duneWave;
+    // Tidal berm transitioning into rolling dunes, lower hollows, and small mossy hills
+    const berm = Math.tanh(distFromShore * 0.042) * 1.5;
+    const upperRise = Math.max(0, distFromShore - 32) * 0.055;
+
+    // Small hills and lower ground depressions inland
+    const inlandMask = THREE.MathUtils.smoothstep(distFromShore, 8, 42);
+    const hills =
+      Math.sin(x * 0.024 + 0.4) * Math.cos(z * 0.026 - 0.3) * 3.4 +
+      Math.sin(x * 0.052 - z * 0.041) * 1.45 +
+      Math.cos(x * 0.095 + z * 0.085) * 0.45;
+
+    // Sheltered lower basins/hollows carved smoothly into the topography
+    const basin =
+      -Math.max(0, Math.sin(x * 0.032 - 1.2) * Math.sin(z * 0.035 + 0.7)) * 1.65;
+
+    h = berm + upperRise + (hills + basin) * inlandMask;
   }
 
-  // Natural cove headlands framing left & right edges of the beach
-  const radial = Math.hypot(x, z * 0.82);
-  if (radial > 95) {
-    const rimT = THREE.MathUtils.smoothstep(radial, 95, 195);
+  // Natural cove headlands near outer boundary
+  const radial = Math.hypot(x, z * 0.85);
+  if (radial > 165) {
+    const rimT = THREE.MathUtils.smoothstep(radial, 165, 290);
     const crag =
-      Math.sin(x * 0.09) * Math.cos(z * 0.09) * 1.8 +
-      Math.sin(x * 0.21 + z * 0.17) * 0.65;
-    // Keep ocean side (-z) open to horizon
-    const landMask = THREE.MathUtils.smoothstep(z - shoreZ, -18, 25);
-    h += rimT * landMask * (11.5 + crag);
+      Math.sin(x * 0.07) * Math.cos(z * 0.07) * 2.4 +
+      Math.sin(x * 0.18 + z * 0.14) * 0.8;
+    const landMask = THREE.MathUtils.smoothstep(z - shoreZ, -20, 28);
+    h += rimT * landMask * (14.5 + crag);
   }
 
   // Subtle wet-sand tide channels near shore
@@ -70,6 +82,22 @@ export function groundHeightAt(x: number, z: number): number {
     Math.exp(-Math.pow((distFromShore - 2.5) / 8.0, 2));
 
   return h + tideChannel;
+}
+
+/**
+ * Evaluates moss/grass coverage (0 = pure black volcanic sand, 1 = rich mossy hill turf).
+ */
+export function mossCoverageAt(x: number, z: number, height: number): number {
+  const distFromShore = z - shorelineZAt(x);
+  if (distFromShore < 10) return 0;
+
+  const inlandFactor = THREE.MathUtils.smoothstep(distFromShore, 12, 38);
+  const elevFactor = THREE.MathUtils.smoothstep(height, 1.05, 3.1);
+  const patch =
+    Math.sin(x * 0.045 + z * 0.038) * 0.5 +
+    Math.cos(x * 0.09 - z * 0.07) * 0.35 +
+    0.45;
+  return THREE.MathUtils.clamp(inlandFactor * (0.45 * elevFactor + 0.55 * patch), 0, 1);
 }
 
 const _nTmp = new THREE.Vector3();
@@ -92,13 +120,14 @@ export function groundNormalAt(
 }
 
 /**
- * Resolves horizontal position against circular rock/leviathan colliders and cove perimeter.
+ * Resolves horizontal position against circular rock/leviathan colliders and invisible perimeter wall.
+ * Returns boundary impact details when player hits the edge of the playable map.
  */
 export function resolveCharacterCollisions(
   pos: THREE.Vector3,
   colliders: ObstacleCollider[],
   charRadius = 0.45
-): void {
+): BoundaryImpact {
   for (let i = 0; i < colliders.length; i++) {
     const c = colliders[i];
     const dx = pos.x - c.x;
@@ -113,18 +142,37 @@ export function resolveCharacterCollisions(
     }
   }
 
-  // Softly keep player from wandering into deep abyssal ocean or past outer cliffs
+  let hit = false;
+  let impactX = pos.x;
+  let impactZ = pos.z;
+  let nx = 0;
+  let nz = 0;
+
+  // Ocean deep-water invisible barrier
   const shoreZ = shorelineZAt(pos.x);
-  const minZ = shoreZ - 14.0; // Allow wading waist-deep into the surf
-  if (pos.z < minZ) {
+  const minZ = shoreZ - 15.0;
+  if (pos.z <= minZ) {
     pos.z = minZ;
+    hit = true;
+    impactX = pos.x;
+    impactZ = minZ;
+    nx = 0;
+    nz = 1;
   }
 
+  // Outer perimeter invisible wall
   const maxR = BEACH_PLAYABLE_RADIUS;
   const r = Math.hypot(pos.x, pos.z);
-  if (r > maxR) {
+  if (r >= maxR) {
     const scale = maxR / r;
     pos.x *= scale;
     pos.z *= scale;
+    hit = true;
+    impactX = pos.x;
+    impactZ = pos.z;
+    nx = -pos.x / maxR;
+    nz = -pos.z / maxR;
   }
+
+  return { hit, x: impactX, z: impactZ, nx, nz };
 }

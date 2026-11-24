@@ -3,6 +3,8 @@ export class BeachAudioEngine {
   private masterGain: GainNode | null = null;
   private surfFilter: BiquadFilterNode | null = null;
   private surfGain: GainNode | null = null;
+  private windGain: GainNode | null = null;
+  private rainGain: GainNode | null = null;
   private noiseBuffer: AudioBuffer | null = null;
   private enabled = false;
   private rafSurfTime = 0;
@@ -98,15 +100,47 @@ export class BeachAudioEngine {
     windFilter.connect(windGain);
     windGain.connect(master);
     windSrc.start();
+    this.windGain = windGain;
+
+    // Rain Patter / Downpour Layer (highpass filtered hiss)
+    const rainSrc = ctx.createBufferSource();
+    rainSrc.buffer = buffer;
+    rainSrc.loop = true;
+
+    const rainFilter = ctx.createBiquadFilter();
+    rainFilter.type = 'highpass';
+    rainFilter.frequency.value = 1450;
+    rainFilter.Q.value = 0.4;
+
+    const rainGain = ctx.createGain();
+    rainGain.gain.value = 0.0;
+
+    rainSrc.connect(rainFilter);
+    rainFilter.connect(rainGain);
+    rainGain.connect(master);
+    rainSrc.start();
+    this.rainGain = rainGain;
   }
 
-  public update(delta: number, distToWater: number): void {
+  public update(
+    delta: number,
+    distToWater: number,
+    rainWeight = 0,
+    windStrength = 0.35
+  ): void {
     if (!this.enabled || !this.ctx || !this.surfFilter || !this.surfGain) return;
     this.rafSurfTime += delta;
     const swell = Math.sin(this.rafSurfTime * 0.65) * 0.5 + 0.5;
     const proximity = Math.max(0.25, 1.0 - Math.min(distToWater, 60) / 75);
     this.surfFilter.frequency.setTargetAtTime(220 + swell * 340 * proximity, this.ctx.currentTime, 0.1);
     this.surfGain.gain.setTargetAtTime((0.18 + swell * 0.24) * proximity, this.ctx.currentTime, 0.1);
+
+    if (this.windGain) {
+      this.windGain.gain.setTargetAtTime(0.06 + windStrength * 0.11, this.ctx.currentTime, 0.2);
+    }
+    if (this.rainGain) {
+      this.rainGain.gain.setTargetAtTime(rainWeight * 0.16, this.ctx.currentTime, 0.2);
+    }
   }
 
   public playFootstep(wading: boolean): void {
@@ -152,6 +186,60 @@ export class BeachAudioEngine {
     gain.connect(this.masterGain);
     osc.start(now);
     osc.stop(now + 0.9);
+  }
+
+  public playCargoPickup(): void {
+    if (!this.enabled || !this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(340, now);
+    osc.frequency.exponentialRampToValueAtTime(510, now + 0.12);
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.exponentialRampToValueAtTime(0.14, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.22);
+  }
+
+  public playCargoDeliver(): void {
+    if (!this.enabled || !this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const notes = [440, 554.37, 659.25];
+    notes.forEach((freq, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.08);
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.001, now + idx * 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.11, now + idx * 0.08 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.08 + 0.35);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now + idx * 0.08);
+      osc.stop(now + idx * 0.08 + 0.38);
+    });
+  }
+
+  public playBoundaryThud(): void {
+    if (!this.enabled || !this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(115, now);
+    osc.frequency.exponentialRampToValueAtTime(48, now + 0.18);
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.exponentialRampToValueAtTime(0.18, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.25);
   }
 
   public dispose(): void {

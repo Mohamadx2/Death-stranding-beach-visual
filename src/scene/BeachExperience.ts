@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { BeachAudioEngine } from './audio';
+import { CargoMissionStatus, CargoSystem, createCargoSystem } from './cargo';
 import { CharacterController, createDrifterCharacter } from './character';
 import { BeachEnvironment, createBeachEnvironment } from './environment';
 import {
@@ -9,9 +10,23 @@ import {
   createProceduralTextures,
   detectSoftwareGl,
 } from './materials';
-import { groundHeightAt, shorelineZAt } from './terrain';
+import { BEACH_PLAYABLE_RADIUS, groundHeightAt, shorelineZAt } from './terrain';
+import {
+  WeatherKind,
+  WeatherMode,
+  WeatherSnapshot,
+  WeatherSystem,
+  createWeatherSystem,
+} from './weather';
 
 export type CameraMode = 'shoulder' | 'vista';
+
+export interface WeatherTelemetry {
+  mode: WeatherMode;
+  active: WeatherKind;
+  target: WeatherKind;
+  transitioning: boolean;
+}
 
 export interface SceneTelemetry {
   x: number;
@@ -20,6 +35,13 @@ export interface SceneTelemetry {
   headingDeg: number;
   speed: number;
   isWading: boolean;
+  stamina: number;
+  staminaExhausted: boolean;
+  staminaCooldownRemaining: number;
+  playableRadius: number;
+  boundaryHit: boolean;
+  weather: WeatherTelemetry;
+  cargo: CargoMissionStatus;
 }
 
 export interface BeachExperienceOptions {
@@ -36,7 +58,9 @@ export class BeachExperience {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private environment: BeachEnvironment;
+  private weather: WeatherSystem;
   private character: CharacterController;
+  private cargo: CargoSystem;
   private audio: BeachAudioEngine;
   private textures: ReturnType<typeof createProceduralTextures>;
   private envMapTexture: THREE.Texture;
@@ -45,6 +69,8 @@ export class BeachExperience {
   private hemiLight: THREE.HemisphereLight;
   private rimLight: THREE.DirectionalLight;
   private fog: THREE.FogExp2;
+  private currentPresetId: AtmospherePresetId = 'ash';
+  private lastWeatherSnapshot: WeatherSnapshot;
 
   private isSoftwareGl: boolean;
   private frameId = 0;
@@ -70,10 +96,12 @@ export class BeachExperience {
   private scanActive = false;
   private scanProgress = 0;
 
-  // Callbacks
+  // Callbacks & Boundary Feedback
   private onTelemetry?: (t: SceneTelemetry) => void;
   private onContextLost?: (lost: boolean) => void;
   private lastTelemetryTime = 0;
+  private boundaryNoticeTimer = 0;
+  private lastBoundaryAudioTime = -10;
   private container: HTMLElement;
 
   constructor(options: BeachExperienceOptions) {
@@ -110,7 +138,7 @@ export class BeachExperience {
     this.scene.fog = this.fog;
     this.scene.background = new THREE.Color(initialPreset.fogColor);
 
-    this.camera = new THREE.PerspectiveCamera(52, width / height, 0.15, 450);
+    this.camera = new THREE.PerspectiveCamera(52, width / height, 0.15, 680);
 
     // Mandatory studio environment map for metallic & wet-surface PBR speculars
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
@@ -157,7 +185,17 @@ export class BeachExperience {
     this.environment = createBeachEnvironment(this.textures, this.isSoftwareGl);
     this.scene.add(this.environment.group);
 
+    this.weather = createWeatherSystem(this.textures, this.isSoftwareGl);
+    this.scene.add(this.weather.group);
+    this.lastWeatherSnapshot = this.weather.getSnapshot();
+
     this.character = createDrifterCharacter(this.scene, this.textures);
+    this.cargo = createCargoSystem(
+      this.scene,
+      this.character.backpackMount,
+      this.textures,
+      this.environment.colliders
+    );
     this.audio = new BeachAudioEngine();
 
     // Initialize camera behind character facing the ocean & stranded whales
@@ -186,6 +224,7 @@ export class BeachExperience {
   }
 
   public setAtmosphere(presetId: AtmospherePresetId): void {
+    this.currentPresetId = presetId;
     const p = ATMOSPHERE_PRESETS[presetId];
     this.environment.applyPreset(presetId);
     this.fog.color.setHex(p.fogColor);
@@ -199,6 +238,12 @@ export class BeachExperience {
     this.hemiLight.groundColor.setHex(p.hemiGround);
     this.hemiLight.intensity = p.hemiIntensity;
     this.renderer.toneMappingExposure = p.exposure;
+  }
+
+  public setWeatherMode(mode: WeatherMode): void {
+    this.weather.setMode(mode);
+    this.lastWeatherSnapshot = this.weather.getSnapshot();
+    this.pushTelemetryNow();
   }
 
   public setCameraMode(mode: CameraMode): void {
@@ -235,6 +280,52 @@ export class BeachExperience {
     this.jumpQueued = true;
   }
 
+  public interactCargo(): void {
+    const result = this.cargo.interact(this.character.position);
+    if (result === 'collected') {
+      this.audio.playCargoPickup();
+    } else if (result === 'delivered') {
+      this.audio.playCargoDeliver();
+    }
+    const status = this.cargo.getStatus(this.character.position);
+    this.character.setCarriedWeight(status.carriedWeightKg);
+    this.pushTelemetryNow();
+  }
+
+  public resetCargoRun(): void {
+    this.cargo.resetMission(this.environment.colliders);
+    this.character.setCarriedWeight(0);
+    this.pushTelemetryNow();
+  }
+
+  private pushTelemetryNow(): void {
+    if (!this.onTelemetry) return;
+    const p = this.character.position;
+    let deg = Math.round(THREE.MathUtils.radToDeg(this.character.yaw)) % 360;
+    if (deg < 0) deg += 360;
+    const cargoStatus = this.cargo.getStatus(p);
+    this.onTelemetry({
+      x: p.x,
+      z: p.z,
+      elevation: p.y,
+      headingDeg: deg,
+      speed: this.character.speed,
+      isWading: this.character.isWading,
+      stamina: this.character.stamina,
+      staminaExhausted: this.character.staminaExhausted,
+      staminaCooldownRemaining: this.character.staminaCooldownRemaining,
+      playableRadius: BEACH_PLAYABLE_RADIUS,
+      boundaryHit: this.boundaryNoticeTimer > 0,
+      weather: {
+        mode: this.lastWeatherSnapshot.mode,
+        active: this.lastWeatherSnapshot.active,
+        target: this.lastWeatherSnapshot.target,
+        transitioning: this.lastWeatherSnapshot.transitioning,
+      },
+      cargo: cargoStatus,
+    });
+  }
+
   private handleKeyDown = (e: KeyboardEvent) => {
     this.keys[e.code] = true;
     if (e.code === 'Space') {
@@ -242,6 +333,9 @@ export class BeachExperience {
     }
     if (e.code === 'KeyF') {
       this.triggerScan();
+    }
+    if (e.code === 'KeyE') {
+      this.interactCargo();
     }
   };
 
@@ -377,8 +471,60 @@ export class BeachExperience {
         }
       );
 
-      // Update environment & particles
+      // Update environment, volumetric weather, cargo beacons & particles
       this.environment.update(elapsed, delta, this.character.position);
+      const weatherSnap = this.weather.update(
+        delta,
+        elapsed,
+        this.character.position,
+        this.camera.position
+      );
+      this.lastWeatherSnapshot = weatherSnap;
+      this.environment.applyWeather(weatherSnap);
+
+      // Blend atmospheric fog & lighting smoothly with active weather
+      const basePreset = ATMOSPHERE_PRESETS[this.currentPresetId];
+      const baseFog = new THREE.Color(basePreset.fogColor);
+      const rainFog = new THREE.Color(0x7c8691);
+      const snowFog = new THREE.Color(0xd7dfe7);
+      baseFog
+        .lerp(rainFog, weatherSnap.rainWeight * 0.72)
+        .lerp(snowFog, weatherSnap.snowWeight * 0.65);
+      this.fog.color.copy(baseFog);
+      if (this.scene.background instanceof THREE.Color) {
+        this.scene.background.copy(baseFog);
+      }
+      this.fog.density = basePreset.fogDensity * weatherSnap.fogMultiplier;
+      this.keyLight.intensity =
+        basePreset.keyIntensity *
+        (weatherSnap.clearWeight * 1.06 +
+          weatherSnap.rainWeight * 0.68 +
+          weatherSnap.snowWeight * 0.92);
+      this.hemiLight.intensity =
+        basePreset.hemiIntensity *
+        (weatherSnap.clearWeight * 1.0 +
+          weatherSnap.rainWeight * 0.85 +
+          weatherSnap.snowWeight * 1.12);
+
+      this.cargo.update(
+        elapsed,
+        this.environment.scanUniforms.uScanRadius.value,
+        this.environment.scanUniforms.uScanStrength.value,
+        this.environment.scanUniforms.uScanOrigin.value
+      );
+
+      // Invisible Wall Boundary Impact Feedback
+      if (this.character.lastBoundaryImpact.hit) {
+        const imp = this.character.lastBoundaryImpact;
+        this.environment.triggerBoundaryImpact(imp.x, imp.z, imp.nx, imp.nz);
+        this.boundaryNoticeTimer = 1.4;
+        if (elapsed - this.lastBoundaryAudioTime > 0.65) {
+          this.lastBoundaryAudioTime = elapsed;
+          this.audio.playBoundaryThud();
+        }
+      } else if (this.boundaryNoticeTimer > 0) {
+        this.boundaryNoticeTimer = Math.max(0, this.boundaryNoticeTimer - delta);
+      }
 
       // Update Odradek terrain pulse wave
       if (this.scanActive) {
@@ -389,7 +535,7 @@ export class BeachExperience {
           this.environment.scanUniforms.uScanStrength.value = 0;
         } else {
           const t = this.scanProgress / duration;
-          this.environment.scanUniforms.uScanRadius.value = t * 58;
+          this.environment.scanUniforms.uScanRadius.value = t * 85;
           this.environment.scanUniforms.uScanStrength.value = Math.sin(t * Math.PI);
         }
       }
@@ -459,23 +605,19 @@ export class BeachExperience {
       );
       this.camera.lookAt(_camTarget);
 
-      // Update ocean surf audio proximity
+      // Update ocean surf, wind & rain audio proximity
       const distToWater = Math.max(0, p.z - shorelineZAt(p.x));
-      this.audio.update(dt, distToWater);
+      this.audio.update(
+        dt,
+        distToWater,
+        this.lastWeatherSnapshot.rainWeight,
+        this.lastWeatherSnapshot.windStrength
+      );
 
       // Throttled telemetry update (~8Hz)
       if (this.onTelemetry && elapsed - this.lastTelemetryTime > 0.12) {
         this.lastTelemetryTime = elapsed;
-        let deg = Math.round(THREE.MathUtils.radToDeg(this.character.yaw)) % 360;
-        if (deg < 0) deg += 360;
-        this.onTelemetry({
-          x: p.x,
-          z: p.z,
-          elevation: p.y,
-          headingDeg: deg,
-          speed: this.character.speed,
-          isWading: this.character.isWading,
-        });
+        this.pushTelemetryNow();
       }
 
       this.renderer.render(this.scene, this.camera);
@@ -506,7 +648,9 @@ export class BeachExperience {
     canvas.removeEventListener('webglcontextlost', this.handleContextLost);
     canvas.removeEventListener('webglcontextrestored', this.handleContextRestored);
 
+    this.cargo.dispose();
     this.character.dispose();
+    this.weather.dispose();
     this.environment.dispose();
     this.textures.dispose();
     this.envMapTexture.dispose();
