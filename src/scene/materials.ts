@@ -102,6 +102,11 @@ export interface ProceduralTextureSet {
   sandAlbedo: THREE.CanvasTexture;
   sandNormal: THREE.CanvasTexture;
   mossAlbedo: THREE.CanvasTexture;
+  mossNormal: THREE.CanvasTexture;
+  cobbleAlbedo: THREE.CanvasTexture;
+  cobbleNormal: THREE.CanvasTexture;
+  desertRockAlbedo: THREE.CanvasTexture;
+  desertRockNormal: THREE.CanvasTexture;
   rockAlbedo: THREE.CanvasTexture;
   rockNormal: THREE.CanvasTexture;
   woodAlbedo: THREE.CanvasTexture;
@@ -197,8 +202,8 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   sandNormal.repeat.set(36, 36);
   sandNormal.anisotropy = maxAnisotropy;
 
-  // 2. Basalt Rock Albedo + Normal
-  const rockSize = 256;
+  // 2. Fractured Dark Basalt Cliff Rock Albedo + Normal (512x512, matching Reference Image 1)
+  const rockSize = 512;
   const rockCanvas = document.createElement('canvas');
   rockCanvas.width = rockSize;
   rockCanvas.height = rockSize;
@@ -209,17 +214,28 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   for (let y = 0; y < rockSize; y++) {
     for (let x = 0; x < rockSize; x++) {
       const i = y * rockSize + x;
+      const n = rand();
+      const warp = Math.sin(x * 0.035 + y * 0.025) * 3.5 + Math.cos(x * 0.07 - y * 0.05) * 1.8;
       const strata =
-        Math.sin(y * 0.16 + Math.sin(x * 0.05) * 3.0) * 0.35 +
-        Math.sin(x * 0.08 + y * 0.04) * 0.25;
-      const pore = rand() > 0.9 ? -0.35 : (rand() - 0.5) * 0.3;
-      const hVal = 0.5 + strata * 0.3 + pore;
+        Math.sin(y * 0.11 + warp) * 0.38 +
+        Math.cos(x * 0.065 + y * 0.045) * 0.28 +
+        Math.sin((x + y) * 0.15) * 0.14;
+      const crack =
+        Math.abs(Math.sin(y * 0.08 + warp * 0.7)) < 0.08 ||
+        Math.abs(Math.sin(x * 0.09 - y * 0.06 + warp * 0.5)) < 0.055
+          ? -0.45
+          : 0;
+      const grit = (n - 0.5) * 0.28;
+      const hVal = 0.5 + strata * 0.34 + crack + grit;
       rockHeights[i] = hVal;
-      const shade = THREE.MathUtils.clamp(38 + strata * 16 + pore * 22, 14, 78);
+
+      // Craggy charcoal-slate basalt with pale weathered mineral edges & tiny moss crevices
+      const mossCrevice = crack < -0.2 && n > 0.65 ? 1 : 0;
+      const shade = THREE.MathUtils.clamp(52 + strata * 26 + grit * 28 + crack * 38, 16, 118);
       const idx = i * 4;
-      rImg.data[idx] = shade;
-      rImg.data[idx + 1] = shade + 2;
-      rImg.data[idx + 2] = shade + 5;
+      rImg.data[idx] = mossCrevice ? shade * 0.85 : shade;
+      rImg.data[idx + 1] = mossCrevice ? shade * 1.18 : shade + 2;
+      rImg.data[idx + 2] = mossCrevice ? shade * 0.65 : shade + 5;
       rImg.data[idx + 3] = 255;
     }
   }
@@ -242,8 +258,8 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       const xr = (x + 1) % rockSize;
       const yu = (y - 1 + rockSize) % rockSize;
       const yd = (y + 1) % rockSize;
-      const dx = (rockHeights[y * rockSize + xr] - rockHeights[y * rockSize + xl]) * 3.5;
-      const dy = (rockHeights[yd * rockSize + x] - rockHeights[yu * rockSize + x]) * 3.5;
+      const dx = (rockHeights[y * rockSize + xr] - rockHeights[y * rockSize + xl]) * 4.4;
+      const dy = (rockHeights[yd * rockSize + x] - rockHeights[yu * rockSize + x]) * 4.4;
       const invLen = 1 / Math.hypot(dx, dy, 1.0);
       const idx = (y * rockSize + x) * 4;
       rnImg.data[idx] = ((-dx * invLen) * 0.5 + 0.5) * 255;
@@ -257,6 +273,7 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   rockNormal.wrapS = THREE.RepeatWrapping;
   rockNormal.wrapT = THREE.RepeatWrapping;
   rockNormal.repeat.set(2, 2);
+  rockNormal.anisotropy = maxAnisotropy;
 
   // 3. Technical Ripstop Fabric Texture for Jacket
   const fabCanvas = document.createElement('canvas');
@@ -326,28 +343,50 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   const particleMap = new THREE.CanvasTexture(pCanvas);
   particleMap.colorSpace = THREE.SRGBColorSpace;
 
-  // 6. Realistic Volcanic Gravel, Scree & Muted Olive-Peat Coastal Soil Texture
-  const mossSize = 256;
+  // 6. Lush Highland Moss, Grass Turf & Lichen Soil Texture + Normal (512x512, matching Reference Images 1 & 2)
+  const mossSize = 512;
   const mossCanvas = document.createElement('canvas');
   mossCanvas.width = mossSize;
   mossCanvas.height = mossSize;
   const mCtx = mossCanvas.getContext('2d')!;
   const mImg = mCtx.createImageData(mossSize, mossSize);
+  const mossHeights = new Float32Array(mossSize * mossSize);
+
   for (let y = 0; y < mossSize; y++) {
     for (let x = 0; x < mossSize; x++) {
       const i = y * mossSize + x;
       const n = rand();
-      const patch =
-        Math.sin(x * 0.08 + y * 0.06) * Math.cos(x * 0.05 - y * 0.09) * 0.5 + 0.5;
-      const pebble = n > 0.94 ? 22 : n < 0.08 ? -14 : (n - 0.5) * 16;
-      // Muted earthy olive-gray & weathered volcanic silt (like Death Stranding highlands)
-      const r = THREE.MathUtils.clamp(68 + patch * 22 + pebble, 34, 130);
-      const g = THREE.MathUtils.clamp(73 + patch * 24 + pebble, 38, 136);
-      const b = THREE.MathUtils.clamp(58 + patch * 16 + pebble, 30, 118);
+      const pillow =
+        Math.sin(x * 0.055 + Math.cos(y * 0.04) * 1.6) *
+          Math.cos(y * 0.055 + Math.sin(x * 0.04) * 1.6) *
+          0.5 +
+        0.5;
+      const clump = Math.sin(x * 0.16 + y * 0.13) * Math.cos(x * 0.12 - y * 0.18) * 0.5 + 0.5;
+      const tuft = n > 0.78 ? 0.35 : n < 0.16 ? -0.3 : (n - 0.5) * 0.42;
+      mossHeights[i] = pillow * 0.45 + clump * 0.3 + tuft * 0.25;
+
+      // Rich olive-moss & emerald-fern canopy with subtle golden-ochre lichen specks
+      const isGoldenSpeck = n > 0.988;
+      const isDarkPeat = pillow < 0.24 && n < 0.38;
+
+      let r = 56 + pillow * 34 + clump * 16 + tuft * 26;
+      let g = 74 + pillow * 44 + clump * 22 + tuft * 34;
+      let b = 29 + pillow * 16 + clump * 8 + tuft * 14;
+
+      if (isGoldenSpeck) {
+        r = 158;
+        g = 152;
+        b = 64;
+      } else if (isDarkPeat) {
+        r *= 0.68;
+        g *= 0.65;
+        b *= 0.72;
+      }
+
       const idx = i * 4;
-      mImg.data[idx] = r;
-      mImg.data[idx + 1] = g;
-      mImg.data[idx + 2] = b;
+      mImg.data[idx] = THREE.MathUtils.clamp(r, 24, 178);
+      mImg.data[idx + 1] = THREE.MathUtils.clamp(g, 32, 190);
+      mImg.data[idx + 2] = THREE.MathUtils.clamp(b, 16, 110);
       mImg.data[idx + 3] = 255;
     }
   }
@@ -358,6 +397,180 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   mossAlbedo.wrapT = THREE.RepeatWrapping;
   mossAlbedo.repeat.set(36, 36);
   mossAlbedo.anisotropy = maxAnisotropy;
+
+  const mossNormCanvas = document.createElement('canvas');
+  mossNormCanvas.width = mossSize;
+  mossNormCanvas.height = mossSize;
+  const mnCtx = mossNormCanvas.getContext('2d')!;
+  const mnImg = mnCtx.createImageData(mossSize, mossSize);
+  for (let y = 0; y < mossSize; y++) {
+    for (let x = 0; x < mossSize; x++) {
+      const xl = (x - 1 + mossSize) % mossSize;
+      const xr = (x + 1) % mossSize;
+      const yu = (y - 1 + mossSize) % mossSize;
+      const yd = (y + 1) % mossSize;
+      const dx = (mossHeights[y * mossSize + xr] - mossHeights[y * mossSize + xl]) * 3.8;
+      const dy = (mossHeights[yd * mossSize + x] - mossHeights[yu * mossSize + x]) * 3.8;
+      const invLen = 1 / Math.hypot(dx, dy, 1.0);
+      const idx = (y * mossSize + x) * 4;
+      mnImg.data[idx] = ((-dx * invLen) * 0.5 + 0.5) * 255;
+      mnImg.data[idx + 1] = ((-dy * invLen) * 0.5 + 0.5) * 255;
+      mnImg.data[idx + 2] = (invLen * 0.5 + 0.5) * 255;
+      mnImg.data[idx + 3] = 255;
+    }
+  }
+  mnCtx.putImageData(mnImg, 0, 0);
+  const mossNormal = new THREE.CanvasTexture(mossNormCanvas);
+  mossNormal.wrapS = THREE.RepeatWrapping;
+  mossNormal.wrapT = THREE.RepeatWrapping;
+  mossNormal.repeat.set(36, 36);
+  mossNormal.anisotropy = maxAnisotropy;
+
+  // 6b. Wet River Cobbles, Crevice Moss & Fallen Leaf Litter (512x512, matching Reference Image 3)
+  const cobSize = 512;
+  const cobCanvas = document.createElement('canvas');
+  cobCanvas.width = cobSize;
+  cobCanvas.height = cobSize;
+  const cCtx = cobCanvas.getContext('2d')!;
+  const cobHeight = new Float32Array(cobSize * cobSize);
+
+  // Damp sandy-mossy earth mortar base
+  cCtx.fillStyle = '#3b4229';
+  cCtx.fillRect(0, 0, cobSize, cobSize);
+
+  // Generate tileable Worley-cell stones for authentic packed wet stones
+  const stoneSites: { x: number; y: number; r: number; g: number; b: number; size: number }[] = [];
+  for (let i = 0; i < 64; i++) {
+    const tone = rand();
+    let r = 86;
+    let g = 88;
+    let b = 85;
+    if (tone < 0.3) {
+      // Dark wet basalt slate
+      r = 46 + rand() * 20;
+      g = 52 + rand() * 20;
+      b = 58 + rand() * 22;
+    } else if (tone < 0.68) {
+      // Pale weathered river granite
+      r = 112 + rand() * 28;
+      g = 110 + rand() * 24;
+      b = 102 + rand() * 22;
+    } else {
+      // Warm sandstone-ochre cobble
+      r = 118 + rand() * 26;
+      g = 102 + rand() * 20;
+      b = 80 + rand() * 18;
+    }
+    stoneSites.push({
+      x: rand() * cobSize,
+      y: rand() * cobSize,
+      r,
+      g,
+      b,
+      size: 0.85 + rand() * 0.45,
+    });
+  }
+
+  const cobImg = cCtx.getImageData(0, 0, cobSize, cobSize);
+  const cData = cobImg.data;
+  for (let y = 0; y < cobSize; y++) {
+    for (let x = 0; x < cobSize; x++) {
+      let minD1 = 1e9;
+      let minD2 = 1e9;
+      let bestSite = stoneSites[0];
+
+      for (let s = 0; s < stoneSites.length; s++) {
+        const site = stoneSites[s];
+        let dx = Math.abs(x - site.x);
+        let dy = Math.abs(y - site.y);
+        if (dx > cobSize * 0.5) dx = cobSize - dx;
+        if (dy > cobSize * 0.5) dy = cobSize - dy;
+        const d = Math.hypot(dx, dy) / site.size;
+        if (d < minD1) {
+          minD2 = minD1;
+          minD1 = d;
+          bestSite = site;
+        } else if (d < minD2) {
+          minD2 = d;
+        }
+      }
+
+      const borderDist = minD2 - minD1;
+      const stoneMask = THREE.MathUtils.smoothstep(borderDist, 2.2, 11.5);
+      const n = rand();
+      const speckle = (n - 0.5) * 20;
+      const dome = Math.sqrt(Math.max(0, 1 - Math.min(1, minD1 / 48) ** 2));
+
+      const i = y * cobSize + x;
+      cobHeight[i] = stoneMask * (0.45 + dome * 0.55) + (n - 0.5) * 0.08;
+
+      // In crevices (stoneMask < 0.35), grow vibrant mossy green & sandy grit
+      const creviceGreen = 1.0 - stoneMask;
+      const leafNoise = Math.sin(x * 0.14 + y * 0.09) * Math.cos(x * 0.08 - y * 0.15);
+      const isGreenShoot = creviceGreen > 0.42 && leafNoise > 0.05;
+      const isRussetLeaf = creviceGreen > 0.48 && leafNoise < -0.48;
+
+      let r = bestSite.r * (0.76 + dome * 0.36) + speckle;
+      let g = bestSite.g * (0.76 + dome * 0.36) + speckle;
+      let b = bestSite.b * (0.76 + dome * 0.36) + speckle;
+
+      if (isGreenShoot) {
+        r = 78 + n * 38;
+        g = 128 + n * 48;
+        b = 34 + n * 18;
+      } else if (isRussetLeaf) {
+        r = 122 + n * 28;
+        g = 62 + n * 18;
+        b = 42 + n * 12;
+      } else if (creviceGreen > 0.25) {
+        r = THREE.MathUtils.lerp(r, 64 + speckle, creviceGreen * 0.85);
+        g = THREE.MathUtils.lerp(g, 82 + speckle, creviceGreen * 0.85);
+        b = THREE.MathUtils.lerp(b, 44 + speckle, creviceGreen * 0.85);
+      }
+
+      const idx = i * 4;
+      cData[idx] = THREE.MathUtils.clamp(r, 18, 210);
+      cData[idx + 1] = THREE.MathUtils.clamp(g, 20, 210);
+      cData[idx + 2] = THREE.MathUtils.clamp(b, 16, 195);
+      cData[idx + 3] = 255;
+    }
+  }
+  cCtx.putImageData(cobImg, 0, 0);
+
+  const cobbleAlbedo = new THREE.CanvasTexture(cobCanvas);
+  cobbleAlbedo.colorSpace = THREE.SRGBColorSpace;
+  cobbleAlbedo.wrapS = THREE.RepeatWrapping;
+  cobbleAlbedo.wrapT = THREE.RepeatWrapping;
+  cobbleAlbedo.repeat.set(2, 2);
+  cobbleAlbedo.anisotropy = maxAnisotropy;
+
+  const cobNormCanvas = document.createElement('canvas');
+  cobNormCanvas.width = cobSize;
+  cobNormCanvas.height = cobSize;
+  const cnCtx = cobNormCanvas.getContext('2d')!;
+  const cnImg = cnCtx.createImageData(cobSize, cobSize);
+  for (let y = 0; y < cobSize; y++) {
+    for (let x = 0; x < cobSize; x++) {
+      const xl = (x - 1 + cobSize) % cobSize;
+      const xr = (x + 1) % cobSize;
+      const yu = (y - 1 + cobSize) % cobSize;
+      const yd = (y + 1) % cobSize;
+      const dx = (cobHeight[y * cobSize + xr] - cobHeight[y * cobSize + xl]) * 4.2;
+      const dy = (cobHeight[yd * cobSize + x] - cobHeight[yu * cobSize + x]) * 4.2;
+      const invLen = 1 / Math.hypot(dx, dy, 1.0);
+      const idx = (y * cobSize + x) * 4;
+      cnImg.data[idx] = ((-dx * invLen) * 0.5 + 0.5) * 255;
+      cnImg.data[idx + 1] = ((-dy * invLen) * 0.5 + 0.5) * 255;
+      cnImg.data[idx + 2] = (invLen * 0.5 + 0.5) * 255;
+      cnImg.data[idx + 3] = 255;
+    }
+  }
+  cnCtx.putImageData(cnImg, 0, 0);
+  const cobbleNormal = new THREE.CanvasTexture(cobNormCanvas);
+  cobbleNormal.wrapS = THREE.RepeatWrapping;
+  cobbleNormal.wrapT = THREE.RepeatWrapping;
+  cobbleNormal.repeat.set(2, 2);
+  cobbleNormal.anisotropy = maxAnisotropy;
 
   // 7. Weathered Coastal Timber Plank Texture (for Wooden Delivery Post)
   const woodCanvas = document.createElement('canvas');
@@ -493,10 +706,85 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   cargoBridgesMap.colorSpace = THREE.SRGBColorSpace;
   cargoBridgesMap.anisotropy = maxAnisotropy;
 
+  // 10. Arid Desert Sandstone / Canyon Rock Albedo + Normal (for inland mountain transition)
+  const dSize = 256;
+  const dCanvas = document.createElement('canvas');
+  dCanvas.width = dSize;
+  dCanvas.height = dSize;
+  const dCtx = dCanvas.getContext('2d')!;
+  const dImg = dCtx.createImageData(dSize, dSize);
+  const dHeights = new Float32Array(dSize * dSize);
+
+  for (let y = 0; y < dSize; y++) {
+    for (let x = 0; x < dSize; x++) {
+      const i = y * dSize + x;
+      const n = rand();
+      const strata =
+        Math.sin(y * 0.22 + Math.sin(x * 0.045) * 3.2) * 0.45 +
+        Math.cos(y * 0.09 - x * 0.03) * 0.3;
+      const crack = Math.abs(Math.sin(x * 0.075 + y * 0.05 + strata * 1.4)) < 0.08 ? -0.32 : 0;
+      const grit = (n - 0.5) * 0.28;
+      const hVal = 0.5 + strata * 0.35 + crack + grit;
+      dHeights[i] = hVal;
+
+      // Sun-baked ochre / dusty sandstone / weathered umber rock palette
+      const warmShift = Math.sin(y * 0.14 + x * 0.02) * 0.5 + 0.5;
+      const baseR = 132 + strata * 26 + warmShift * 18 + grit * 34 + crack * 48;
+      const baseG = 104 + strata * 20 + warmShift * 10 + grit * 28 + crack * 40;
+      const baseB = 79 + strata * 14 + grit * 22 + crack * 32;
+
+      const idx = i * 4;
+      dImg.data[idx] = THREE.MathUtils.clamp(baseR, 42, 196);
+      dImg.data[idx + 1] = THREE.MathUtils.clamp(baseG, 34, 162);
+      dImg.data[idx + 2] = THREE.MathUtils.clamp(baseB, 26, 130);
+      dImg.data[idx + 3] = 255;
+    }
+  }
+  dCtx.putImageData(dImg, 0, 0);
+  const desertRockAlbedo = new THREE.CanvasTexture(dCanvas);
+  desertRockAlbedo.colorSpace = THREE.SRGBColorSpace;
+  desertRockAlbedo.wrapS = THREE.RepeatWrapping;
+  desertRockAlbedo.wrapT = THREE.RepeatWrapping;
+  desertRockAlbedo.repeat.set(2, 2);
+  desertRockAlbedo.anisotropy = maxAnisotropy;
+
+  const dNormCanvas = document.createElement('canvas');
+  dNormCanvas.width = dSize;
+  dNormCanvas.height = dSize;
+  const dnCtx = dNormCanvas.getContext('2d')!;
+  const dnImg = dnCtx.createImageData(dSize, dSize);
+  for (let y = 0; y < dSize; y++) {
+    for (let x = 0; x < dSize; x++) {
+      const xl = (x - 1 + dSize) % dSize;
+      const xr = (x + 1) % dSize;
+      const yu = (y - 1 + dSize) % dSize;
+      const yd = (y + 1) % dSize;
+      const dx = (dHeights[y * dSize + xr] - dHeights[y * dSize + xl]) * 3.8;
+      const dy = (dHeights[yd * dSize + x] - dHeights[yu * dSize + x]) * 3.8;
+      const invLen = 1 / Math.hypot(dx, dy, 1.0);
+      const idx = (y * dSize + x) * 4;
+      dnImg.data[idx] = ((-dx * invLen) * 0.5 + 0.5) * 255;
+      dnImg.data[idx + 1] = ((-dy * invLen) * 0.5 + 0.5) * 255;
+      dnImg.data[idx + 2] = (invLen * 0.5 + 0.5) * 255;
+      dnImg.data[idx + 3] = 255;
+    }
+  }
+  dnCtx.putImageData(dnImg, 0, 0);
+  const desertRockNormal = new THREE.CanvasTexture(dNormCanvas);
+  desertRockNormal.wrapS = THREE.RepeatWrapping;
+  desertRockNormal.wrapT = THREE.RepeatWrapping;
+  desertRockNormal.repeat.set(2, 2);
+  desertRockNormal.anisotropy = maxAnisotropy;
+
   return {
     sandAlbedo,
     sandNormal,
     mossAlbedo,
+    mossNormal,
+    cobbleAlbedo,
+    cobbleNormal,
+    desertRockAlbedo,
+    desertRockNormal,
     rockAlbedo,
     rockNormal,
     woodAlbedo,
@@ -509,6 +797,11 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       sandAlbedo.dispose();
       sandNormal.dispose();
       mossAlbedo.dispose();
+      mossNormal.dispose();
+      cobbleAlbedo.dispose();
+      cobbleNormal.dispose();
+      desertRockAlbedo.dispose();
+      desertRockNormal.dispose();
       rockAlbedo.dispose();
       rockNormal.dispose();
       woodAlbedo.dispose();

@@ -3,14 +3,30 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { BeachAudioEngine } from './audio';
 import { CargoMissionStatus, CargoSystem, createCargoSystem } from './cargo';
 import { CharacterController, createDrifterCharacter } from './character';
-import { BeachEnvironment, createBeachEnvironment } from './environment';
+import { CrystalSystem, createChiralCrystalSystem } from './crystals';
+import {
+  BeachEnvironment,
+  REFUGE_HUT_POS,
+  createBeachEnvironment,
+} from './environment';
+import {
+  CraftableEquipmentId,
+  EquipmentSnapshot,
+  EquipmentSystem,
+  createEquipmentSystem,
+} from './equipment';
 import {
   ATMOSPHERE_PRESETS,
   AtmospherePresetId,
   createProceduralTextures,
   detectSoftwareGl,
 } from './materials';
-import { BEACH_PLAYABLE_RADIUS, groundHeightAt, shorelineZAt } from './terrain';
+import {
+  BEACH_PLAYABLE_RADIUS,
+  MUSIC_TRIGGER_POINT,
+  groundHeightAt,
+  shorelineZAt,
+} from './terrain';
 import {
   WeatherKind,
   WeatherMode,
@@ -18,6 +34,12 @@ import {
   WeatherSystem,
   createWeatherSystem,
 } from './weather';
+import {
+  GameSaveData,
+  getSavedPlayerName,
+  setSavedPlayerName,
+} from './saveSystem';
+import { WormSystem, createWormSystem } from './worms';
 
 export type CameraMode = 'shoulder' | 'vista';
 
@@ -28,6 +50,16 @@ export interface WeatherTelemetry {
   transitioning: boolean;
 }
 
+export interface MusicTriggerTelemetry {
+  triggered: boolean;
+  bannerVisible: boolean;
+  title: string;
+  subtitle: string;
+  triggerPos: { x: number; z: number };
+  customTrackName: string | null;
+  customPlaying: boolean;
+}
+
 export interface SceneTelemetry {
   x: number;
   z: number;
@@ -35,13 +67,26 @@ export interface SceneTelemetry {
   headingDeg: number;
   speed: number;
   isWading: boolean;
+  health: number;
+  maxHealth: number;
+  playerName: string;
   stamina: number;
   staminaExhausted: boolean;
   staminaCooldownRemaining: number;
+  cold: number;
+  insideBuilding: boolean;
+  buildingName: string | null;
+  wormsInPouch: number;
+  maxWormsInPouch: number;
+  nearbyWorm: boolean;
+  refugeHutPos: { x: number; z: number };
   playableRadius: number;
   boundaryHit: boolean;
   weather: WeatherTelemetry;
+  music: MusicTriggerTelemetry;
   cargo: CargoMissionStatus;
+  nearbyCrystalYield: number | null;
+  equipment: EquipmentSnapshot;
 }
 
 export interface BeachExperienceOptions {
@@ -60,10 +105,16 @@ export class BeachExperience {
   private environment: BeachEnvironment;
   private weather: WeatherSystem;
   private character: CharacterController;
+  private equipment: EquipmentSystem;
+  private crystals: CrystalSystem;
+  private worms: WormSystem;
   private cargo: CargoSystem;
   private audio: BeachAudioEngine;
   private textures: ReturnType<typeof createProceduralTextures>;
   private envMapTexture: THREE.Texture;
+  private wormsInPouch = 0;
+  private readonly maxWormsInPouch = 5;
+  private paused = false;
 
   private keyLight: THREE.DirectionalLight;
   private hemiLight: THREE.HemisphereLight;
@@ -96,12 +147,14 @@ export class BeachExperience {
   private scanActive = false;
   private scanProgress = 0;
 
-  // Callbacks & Boundary Feedback
+  // Callbacks, Boundary & Music Trigger Feedback
   private onTelemetry?: (t: SceneTelemetry) => void;
   private onContextLost?: (lost: boolean) => void;
   private lastTelemetryTime = 0;
   private boundaryNoticeTimer = 0;
   private lastBoundaryAudioTime = -10;
+  private musicTriggered = false;
+  private musicBannerTimer = 0;
   private container: HTMLElement;
 
   constructor(options: BeachExperienceOptions) {
@@ -138,7 +191,7 @@ export class BeachExperience {
     this.scene.fog = this.fog;
     this.scene.background = new THREE.Color(initialPreset.fogColor);
 
-    this.camera = new THREE.PerspectiveCamera(52, width / height, 0.15, 680);
+    this.camera = new THREE.PerspectiveCamera(52, width / height, 0.15, 960);
 
     // Mandatory studio environment map for metallic & wet-surface PBR speculars
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
@@ -190,13 +243,27 @@ export class BeachExperience {
     this.lastWeatherSnapshot = this.weather.getSnapshot();
 
     this.character = createDrifterCharacter(this.scene, this.textures);
+    this.character.setPlayerName(getSavedPlayerName());
+    this.equipment = createEquipmentSystem(this.scene, this.isSoftwareGl);
+    this.crystals = createChiralCrystalSystem(
+      this.scene,
+      this.environment.colliders,
+      this.isSoftwareGl
+    );
+    this.worms = createWormSystem(
+      this.scene,
+      this.environment.bushSpots,
+      this.isSoftwareGl
+    );
     this.cargo = createCargoSystem(
       this.scene,
       this.character.backpackMount,
+      this.equipment.cartCargoMount,
       this.textures,
       this.environment.colliders
     );
     this.audio = new BeachAudioEngine();
+    this.audio.setOnMusicStateChange(() => this.pushTelemetryNow());
 
     // Initialize camera behind character facing the ocean & stranded whales
     this.syncCameraImmediate();
@@ -281,19 +348,219 @@ export class BeachExperience {
   }
 
   public interactCargo(): void {
-    const result = this.cargo.interact(this.character.position);
+    const p = this.character.position;
+    const preStatus = this.cargo.getStatus(p);
+    const nearCrystal = this.crystals.getNearbyCrystal(p);
+    const nearWorm = this.worms.getNearbyWorm(p);
+
+    if (nearCrystal && (!preStatus.nearbyCargoLabel || preStatus.backpackFull)) {
+      const yieldCg = this.crystals.collectNearby(p);
+      if (yieldCg > 0) {
+        this.equipment.addCrystals(yieldCg);
+        this.audio.playCrystalCollect();
+        this.pushTelemetryNow();
+        return;
+      }
+    }
+
+    if (
+      nearWorm &&
+      (!preStatus.nearbyCargoLabel || preStatus.backpackFull) &&
+      !(preStatus.nearDeliveryPost && preStatus.carried > 0)
+    ) {
+      if (this.worms.collectNearby(p)) {
+        if (this.wormsInPouch < this.maxWormsInPouch) {
+          this.wormsInPouch++;
+          this.audio.playCargoPickup();
+        } else {
+          this.character.applyWormFeeding();
+          this.audio.playWormEat();
+        }
+        this.pushTelemetryNow();
+        return;
+      }
+    }
+
+    const result = this.cargo.interact(p);
     if (result === 'collected') {
       this.audio.playCargoPickup();
     } else if (result === 'delivered') {
       this.audio.playCargoDeliver();
     }
-    const status = this.cargo.getStatus(this.character.position);
-    this.character.setCarriedWeight(status.carriedWeightKg);
+    const status = this.cargo.getStatus(p);
+    this.character.setCarriedWeight(status.effectiveWeightKg);
+    this.pushTelemetryNow();
+  }
+
+  public eatWorm(): void {
+    if (this.wormsInPouch <= 0) return;
+    this.wormsInPouch--;
+    this.character.applyWormFeeding();
+    this.audio.playWormEat();
+    this.pushTelemetryNow();
+  }
+
+  public craftEquipment(id: CraftableEquipmentId): void {
+    if (this.equipment.craft(id)) {
+      this.audio.playCraftEquip();
+      const snap = this.equipment.getSnapshot();
+      this.cargo.setCartAvailable(snap.hasCart && snap.cartAttached);
+      const status = this.cargo.getStatus(this.character.position);
+      this.character.setCarriedWeight(status.effectiveWeightKg);
+      this.pushTelemetryNow();
+    }
+  }
+
+  public deployLadder(): void {
+    if (this.equipment.deployLadder(this.character.position, this.character.yaw)) {
+      this.audio.playCraftEquip();
+      this.pushTelemetryNow();
+    }
+  }
+
+  public deployAnchor(): void {
+    if (this.equipment.deployAnchor(this.character.position, this.character.yaw)) {
+      this.audio.playCraftEquip();
+      this.pushTelemetryNow();
+    }
+  }
+
+  public toggleCartHitch(): void {
+    if (this.equipment.toggleCartAttached()) {
+      this.audio.playCraftEquip();
+      const snap = this.equipment.getSnapshot();
+      this.cargo.setCartAvailable(snap.hasCart && snap.cartAttached);
+      const status = this.cargo.getStatus(this.character.position);
+      this.character.setCarriedWeight(status.effectiveWeightKg);
+      this.pushTelemetryNow();
+    }
+  }
+
+  public shiftCargoToCart(): void {
+    if (this.cargo.shiftPackToCart()) {
+      this.audio.playCargoPickup();
+      const status = this.cargo.getStatus(this.character.position);
+      this.character.setCarriedWeight(status.effectiveWeightKg);
+      this.pushTelemetryNow();
+    }
+  }
+
+  public async setCustomMusicFile(file: File): Promise<void> {
+    await this.audio.setCustomMusicFile(file);
+    this.pushTelemetryNow();
+  }
+
+  public clearCustomMusic(): void {
+    this.audio.clearCustomMusic();
+    this.pushTelemetryNow();
+  }
+
+  public toggleCustomMusicPlayback(): void {
+    const playing = this.audio.toggleCustomPlayback();
+    if (playing) {
+      this.musicBannerTimer = 5.5;
+    }
+    this.pushTelemetryNow();
+  }
+
+  public setPaused(next: boolean): void {
+    this.paused = next;
+    if (next) {
+      this.keys = {};
+      this.jumpQueued = false;
+      this.isDragging = false;
+    }
+  }
+
+  public setPlayerName(name: string): void {
+    const clean = setSavedPlayerName(name);
+    this.character.setPlayerName(clean);
+    this.pushTelemetryNow();
+  }
+
+  public exportSaveData(slotLabel: string): GameSaveData {
+    const p = this.character.position;
+    return {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      slotLabel,
+      playerName: this.character.playerName,
+      playerPos: { x: p.x, y: p.y, z: p.z },
+      yaw: this.character.yaw,
+      health: this.character.health,
+      stamina: this.character.stamina,
+      staminaExhausted: this.character.staminaExhausted,
+      cold: this.character.cold,
+      wormsInPouch: this.wormsInPouch,
+      preset: this.currentPresetId,
+      weatherMode: this.lastWeatherSnapshot.mode,
+      musicTriggered: this.musicTriggered,
+      cargo: this.cargo.exportState(),
+      crystals: this.crystals.exportState(),
+      collectedWorms: this.worms.exportState(),
+      equipment: this.equipment.exportState(),
+    };
+  }
+
+  public loadSaveData(data: GameSaveData): {
+    preset: AtmospherePresetId;
+    weatherMode: WeatherMode;
+    playerName: string;
+  } {
+    this.setAtmosphere(data.preset);
+    this.setWeatherMode(data.weatherMode);
+    this.equipment.importState(data.equipment);
+    const eqSnap = this.equipment.getSnapshot();
+    this.cargo.setCartAvailable(eqSnap.hasCart && eqSnap.cartAttached);
+    this.cargo.importState(data.cargo);
+    this.crystals.importState(data.crystals);
+    this.worms.importState(data.collectedWorms);
+    this.wormsInPouch = THREE.MathUtils.clamp(data.wormsInPouch ?? 0, 0, this.maxWormsInPouch);
+    this.musicTriggered = Boolean(data.musicTriggered);
+    this.musicBannerTimer = 0;
+
+    const cleanName = setSavedPlayerName(data.playerName || 'Drifter');
+    this.character.restoreState({
+      x: data.playerPos.x,
+      y: data.playerPos.y,
+      z: data.playerPos.z,
+      yaw: data.yaw,
+      health: data.health ?? 100,
+      stamina: data.stamina ?? 100,
+      staminaExhausted: Boolean(data.staminaExhausted),
+      cold: data.cold ?? 14,
+      playerName: cleanName,
+    });
+    const cargoStatus = this.cargo.getStatus(this.character.position);
+    this.character.setCarriedWeight(cargoStatus.effectiveWeightKg);
+    this.syncCameraImmediate();
+    this.pushTelemetryNow();
+
+    return {
+      preset: data.preset,
+      weatherMode: data.weatherMode,
+      playerName: cleanName,
+    };
+  }
+
+  public startNewGame(): void {
+    this.equipment.resetEquipment();
+    this.cargo.setCartAvailable(false);
+    this.cargo.resetMission(this.environment.colliders);
+    this.crystals.resetCrystals(this.environment.colliders);
+    this.worms.resetWorms();
+    this.wormsInPouch = 0;
+    this.musicTriggered = false;
+    this.musicBannerTimer = 0;
+    this.character.resetState();
+    this.syncCameraImmediate();
     this.pushTelemetryNow();
   }
 
   public resetCargoRun(): void {
     this.cargo.resetMission(this.environment.colliders);
+    this.crystals.resetCrystals(this.environment.colliders);
+    this.worms.resetWorms();
     this.character.setCarriedWeight(0);
     this.pushTelemetryNow();
   }
@@ -304,6 +571,9 @@ export class BeachExperience {
     let deg = Math.round(THREE.MathUtils.radToDeg(this.character.yaw)) % 360;
     if (deg < 0) deg += 360;
     const cargoStatus = this.cargo.getStatus(p);
+    const nearCrystal = this.crystals.getNearbyCrystal(p);
+    const nearWorm = this.worms.getNearbyWorm(p);
+    const customInfo = this.audio.getCustomTrackInfo();
     this.onTelemetry({
       x: p.x,
       z: p.z,
@@ -311,9 +581,19 @@ export class BeachExperience {
       headingDeg: deg,
       speed: this.character.speed,
       isWading: this.character.isWading,
+      health: this.character.health,
+      maxHealth: this.character.maxHealth,
+      playerName: this.character.playerName,
       stamina: this.character.stamina,
       staminaExhausted: this.character.staminaExhausted,
       staminaCooldownRemaining: this.character.staminaCooldownRemaining,
+      cold: this.character.cold,
+      insideBuilding: this.character.insideBuilding,
+      buildingName: this.character.buildingName,
+      wormsInPouch: this.wormsInPouch,
+      maxWormsInPouch: this.maxWormsInPouch,
+      nearbyWorm: nearWorm !== null,
+      refugeHutPos: REFUGE_HUT_POS,
       playableRadius: BEACH_PLAYABLE_RADIUS,
       boundaryHit: this.boundaryNoticeTimer > 0,
       weather: {
@@ -322,11 +602,31 @@ export class BeachExperience {
         target: this.lastWeatherSnapshot.target,
         transitioning: this.lastWeatherSnapshot.transitioning,
       },
+      music: {
+        triggered: this.musicTriggered,
+        bannerVisible: this.musicBannerTimer > 0,
+        title: customInfo ? customInfo.title : MUSIC_TRIGGER_POINT.title,
+        subtitle: customInfo ? customInfo.subtitle : MUSIC_TRIGGER_POINT.subtitle,
+        triggerPos: { x: MUSIC_TRIGGER_POINT.x, z: MUSIC_TRIGGER_POINT.z },
+        customTrackName: customInfo ? customInfo.title : null,
+        customPlaying: customInfo ? customInfo.isPlaying : false,
+      },
       cargo: cargoStatus,
+      nearbyCrystalYield: nearCrystal ? nearCrystal.yieldCg : null,
+      equipment: this.equipment.getSnapshot(),
     });
   }
 
   private handleKeyDown = (e: KeyboardEvent) => {
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+    ) {
+      return;
+    }
+    if (this.paused) return;
+
     this.keys[e.code] = true;
     if (e.code === 'Space') {
       this.jumpQueued = true;
@@ -336,6 +636,21 @@ export class BeachExperience {
     }
     if (e.code === 'KeyE') {
       this.interactCargo();
+    }
+    if (e.code === 'KeyQ') {
+      this.eatWorm();
+    }
+    if (e.code === 'Digit1') {
+      this.deployLadder();
+    }
+    if (e.code === 'Digit2') {
+      this.deployAnchor();
+    }
+    if (e.code === 'Digit3') {
+      this.toggleCartHitch();
+    }
+    if (e.code === 'KeyT') {
+      this.shiftCargoToCart();
     }
   };
 
@@ -442,34 +757,53 @@ export class BeachExperience {
       const delta = this.clock.getDelta();
       const elapsed = this.clock.getElapsedTime();
 
-      // Gather directional input
-      const forward =
-        (this.keys['KeyW'] || this.keys['ArrowUp'] ? 1 : 0) -
-        (this.keys['KeyS'] || this.keys['ArrowDown'] ? 1 : 0) +
-        this.touchMove.y;
-      const right =
-        (this.keys['KeyD'] || this.keys['ArrowRight'] ? 1 : 0) -
-        (this.keys['KeyA'] || this.keys['ArrowLeft'] ? 1 : 0) +
-        this.touchMove.x;
-      const sprint = Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
-      const jumpPressed = this.jumpQueued;
+      // Gather directional input (frozen while menu/title screen is open)
+      const forward = this.paused
+        ? 0
+        : (this.keys['KeyW'] || this.keys['ArrowUp'] ? 1 : 0) -
+          (this.keys['KeyS'] || this.keys['ArrowDown'] ? 1 : 0) +
+          this.touchMove.y;
+      const right = this.paused
+        ? 0
+        : (this.keys['KeyD'] || this.keys['ArrowRight'] ? 1 : 0) -
+          (this.keys['KeyA'] || this.keys['ArrowLeft'] ? 1 : 0) +
+          this.touchMove.x;
+      const sprint = !this.paused && Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
+      const jumpPressed = !this.paused && this.jumpQueued;
       this.jumpQueued = false;
 
-      this.character.update(
-        delta,
-        elapsed,
-        {
-          forward: THREE.MathUtils.clamp(forward, -1, 1),
-          right: THREE.MathUtils.clamp(right, -1, 1),
-          sprint,
-          jumpPressed,
-          cameraYaw: this.cameraYaw,
-        },
-        this.environment.colliders,
-        (wading) => {
-          this.audio.playFootstep(wading);
-        }
+      const anchorAssist = this.equipment.isNearAnchor(this.character.position);
+      const shelter = this.environment.isInsideBuilding(
+        this.character.position.x,
+        this.character.position.z
       );
+
+      if (!this.paused) {
+        this.character.update(
+          delta,
+          elapsed,
+          {
+            forward: THREE.MathUtils.clamp(forward, -1, 1),
+            right: THREE.MathUtils.clamp(right, -1, 1),
+            sprint,
+            jumpPressed,
+            cameraYaw: this.cameraYaw,
+            anchorAssist,
+            rainWeight: this.lastWeatherSnapshot.rainWeight,
+            snowWeight: this.lastWeatherSnapshot.snowWeight,
+            insideBuilding: shelter.inside,
+            buildingName: shelter.buildingName,
+            surfaceHeightResolver: (x, z, terrainY) =>
+              this.equipment.getSurfaceHeightAt(x, z, terrainY).y,
+          },
+          this.environment.colliders,
+          (event) => {
+            this.audio.playFootstep(event.surface, event.heavyCargo, event.weightKg);
+          }
+        );
+      } else {
+        this.cameraYaw += delta * 0.08;
+      }
 
       // Update environment, volumetric weather, cargo beacons & particles
       this.environment.update(elapsed, delta, this.character.position);
@@ -512,6 +846,20 @@ export class BeachExperience {
         this.environment.scanUniforms.uScanStrength.value,
         this.environment.scanUniforms.uScanOrigin.value
       );
+      this.crystals.update(
+        elapsed,
+        delta,
+        this.environment.scanUniforms.uScanRadius.value,
+        this.environment.scanUniforms.uScanStrength.value,
+        this.environment.scanUniforms.uScanOrigin.value
+      );
+      this.worms.update(elapsed);
+      this.equipment.update(
+        delta,
+        elapsed,
+        this.character.position,
+        this.character.yaw
+      );
 
       // Invisible Wall Boundary Impact Feedback
       if (this.character.lastBoundaryImpact.hit) {
@@ -545,6 +893,25 @@ export class BeachExperience {
       this.keyLight.position.set(p.x + 22, p.y + 32, p.z - 26);
       this.keyLight.target.position.copy(p);
       this.keyLight.target.updateMatrixWorld();
+
+      // One-Shot Coastal Overlook Music Trigger (plays once for 1m45s + 6s title card)
+      if (!this.musicTriggered) {
+        const distToMusic = Math.hypot(
+          p.x - MUSIC_TRIGGER_POINT.x,
+          p.z - MUSIC_TRIGGER_POINT.z
+        );
+        if (distToMusic <= MUSIC_TRIGGER_POINT.radius) {
+          this.musicTriggered = true;
+          this.musicBannerTimer = 6.0;
+          this.audio.playCoastalTrackOnce(105);
+          this.pushTelemetryNow();
+        }
+      } else if (this.musicBannerTimer > 0) {
+        this.musicBannerTimer = Math.max(0, this.musicBannerTimer - delta);
+        if (this.musicBannerTimer === 0) {
+          this.pushTelemetryNow();
+        }
+      }
 
       // Smooth damped third-person camera with shoulder offset & terrain clearance
       const dt = Math.min(delta, 0.05);
@@ -649,6 +1016,9 @@ export class BeachExperience {
     canvas.removeEventListener('webglcontextrestored', this.handleContextRestored);
 
     this.cargo.dispose();
+    this.worms.dispose();
+    this.crystals.dispose();
+    this.equipment.dispose();
     this.character.dispose();
     this.weather.dispose();
     this.environment.dispose();

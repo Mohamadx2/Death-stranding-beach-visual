@@ -4,13 +4,22 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ControlOverlay } from './components/ControlOverlay';
+import { ControlOverlay, MenuMode } from './components/ControlOverlay';
 import {
   BeachExperience,
   CameraMode,
   SceneTelemetry,
 } from './scene/BeachExperience';
+import { CraftableEquipmentId } from './scene/equipment';
 import { AtmospherePresetId } from './scene/materials';
+import {
+  SaveSlotSummary,
+  deleteSaveSlot,
+  getSavedPlayerName,
+  listSaveSlots,
+  loadGameFromSlot,
+  saveGameToSlot,
+} from './scene/saveSystem';
 import { WeatherMode } from './scene/weather';
 
 export default function App() {
@@ -22,17 +31,31 @@ export default function App() {
   const [cameraMode, setCameraMode] = useState<CameraMode>('shoulder');
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [contextLost, setContextLost] = useState(false);
-  const [telemetry, setTelemetry] = useState<SceneTelemetry>({
+  const [menuMode, setMenuMode] = useState<MenuMode>('closed');
+  const [saveSlots, setSaveSlots] = useState<SaveSlotSummary[]>(() => listSaveSlots());
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+
+  const [telemetry, setTelemetry] = useState<SceneTelemetry>(() => ({
     x: 0,
     z: 18,
     elevation: 0.9,
     headingDeg: 180,
     speed: 0,
     isWading: false,
+    health: 100,
+    maxHealth: 100,
+    playerName: getSavedPlayerName(),
     stamina: 100,
     staminaExhausted: false,
     staminaCooldownRemaining: 0,
-    playableRadius: 210,
+    cold: 14,
+    insideBuilding: false,
+    buildingName: null,
+    wormsInPouch: 0,
+    maxWormsInPouch: 5,
+    nearbyWorm: false,
+    refugeHutPos: { x: -20, z: 128 },
+    playableRadius: 300,
     boundaryHit: false,
     weather: {
       mode: 'auto',
@@ -40,12 +63,26 @@ export default function App() {
       target: 'clear',
       transitioning: false,
     },
+    music: {
+      triggered: false,
+      bannerVisible: false,
+      title: 'Bones of the Tide',
+      subtitle: 'Coastal Overlook · 01:45',
+      triggerPos: { x: -34, z: 62 },
+      customTrackName: null,
+      customPlaying: false,
+    },
     cargo: {
-      total: 8,
+      total: 12,
       carried: 0,
+      packCarried: 0,
+      cartCarried: 0,
       maxCarry: 6,
+      maxCartCarry: 0,
       delivered: 0,
       carriedWeightKg: 0,
+      cartWeightKg: 0,
+      effectiveWeightKg: 0,
       nearbyCargoLabel: null,
       nearbyCargoWeightKg: null,
       backpackFull: false,
@@ -53,7 +90,19 @@ export default function App() {
       deliveryPostPos: { x: 14, z: 36 },
       worldCargos: [],
     },
-  });
+    nearbyCrystalYield: null,
+    equipment: {
+      crystals: 0,
+      laddersInPack: 1,
+      anchorsInPack: 0,
+      deployedLadders: 0,
+      deployedAnchors: 0,
+      hasCart: false,
+      cartAttached: false,
+      nearAnchorAssist: false,
+      onLadder: false,
+    },
+  }));
 
   useEffect(() => {
     const container = mountRef.current;
@@ -70,6 +119,31 @@ export default function App() {
       exp.dispose();
       experienceRef.current = null;
     };
+  }, []);
+
+  useEffect(() => {
+    experienceRef.current?.setPaused(menuMode !== 'closed');
+  }, [menuMode]);
+
+  useEffect(() => {
+    if (!saveNotice) return;
+    const timer = window.setTimeout(() => setSaveNotice(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [saveNotice]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Escape') {
+        setSaveSlots(listSaveSlots());
+        setMenuMode((prev) => {
+          if (prev === 'closed') return 'pause';
+          if (prev === 'pause') return 'closed';
+          return prev;
+        });
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
   const handleSelectPreset = useCallback((next: AtmospherePresetId) => {
@@ -101,8 +175,44 @@ export default function App() {
     experienceRef.current?.interactCargo();
   }, []);
 
+  const handleEatWorm = useCallback(() => {
+    experienceRef.current?.eatWorm();
+  }, []);
+
   const handleResetCargoRun = useCallback(() => {
     experienceRef.current?.resetCargoRun();
+  }, []);
+
+  const handleCraftEquipment = useCallback((id: CraftableEquipmentId) => {
+    experienceRef.current?.craftEquipment(id);
+  }, []);
+
+  const handleDeployLadder = useCallback(() => {
+    experienceRef.current?.deployLadder();
+  }, []);
+
+  const handleDeployAnchor = useCallback(() => {
+    experienceRef.current?.deployAnchor();
+  }, []);
+
+  const handleToggleCart = useCallback(() => {
+    experienceRef.current?.toggleCartHitch();
+  }, []);
+
+  const handleShiftToCart = useCallback(() => {
+    experienceRef.current?.shiftCargoToCart();
+  }, []);
+
+  const handleUploadMusic = useCallback((file: File) => {
+    void experienceRef.current?.setCustomMusicFile(file);
+  }, []);
+
+  const handleToggleCustomMusic = useCallback(() => {
+    experienceRef.current?.toggleCustomMusicPlayback();
+  }, []);
+
+  const handleClearCustomMusic = useCallback(() => {
+    experienceRef.current?.clearCustomMusic();
   }, []);
 
   const handleTouchMove = useCallback((x: number, y: number) => {
@@ -111,6 +221,60 @@ export default function App() {
 
   const handleJump = useCallback(() => {
     experienceRef.current?.triggerJump();
+  }, []);
+
+  const handleOpenMenu = useCallback(() => {
+    setSaveSlots(listSaveSlots());
+    setMenuMode('pause');
+  }, []);
+
+  const handleCloseMenu = useCallback(() => {
+    setMenuMode('closed');
+  }, []);
+
+  const handleExitToTitle = useCallback(() => {
+    setSaveSlots(listSaveSlots());
+    setMenuMode('title');
+  }, []);
+
+  const handleNewGame = useCallback(() => {
+    if (!experienceRef.current) return;
+    experienceRef.current.startNewGame();
+    experienceRef.current.setAtmosphere('ash');
+    experienceRef.current.setWeatherMode('auto');
+    setPreset('ash');
+    setWeatherMode('auto');
+    setMenuMode('closed');
+    setSaveNotice('Started new expedition');
+  }, []);
+
+  const handleSaveSlot = useCallback((slotId: string, label: string) => {
+    if (!experienceRef.current) return;
+    const data = experienceRef.current.exportSaveData(label);
+    const ok = saveGameToSlot(slotId, data);
+    setSaveSlots(listSaveSlots());
+    setSaveNotice(ok ? `Saved to ${label}` : 'Save failed (storage unavailable)');
+  }, []);
+
+  const handleLoadSlot = useCallback((slotId: string) => {
+    const data = loadGameFromSlot(slotId);
+    if (!data || !experienceRef.current) return;
+    const loaded = experienceRef.current.loadSaveData(data);
+    setPreset(loaded.preset);
+    setWeatherMode(loaded.weatherMode);
+    setSaveSlots(listSaveSlots());
+    setMenuMode('closed');
+    setSaveNotice(`Loaded ${data.slotLabel}`);
+  }, []);
+
+  const handleDeleteSlot = useCallback((slotId: string) => {
+    deleteSaveSlot(slotId);
+    setSaveSlots(listSaveSlots());
+    setSaveNotice('Save slot cleared');
+  }, []);
+
+  const handleChangePlayerName = useCallback((name: string) => {
+    experienceRef.current?.setPlayerName(name);
   }, []);
 
   return (
@@ -123,16 +287,37 @@ export default function App() {
         cameraMode={cameraMode}
         audioEnabled={audioEnabled}
         contextLost={contextLost}
+        menuMode={menuMode}
+        saveSlots={saveSlots}
+        saveNotice={saveNotice}
         onSelectPreset={handleSelectPreset}
         onSelectWeather={handleSelectWeather}
         onSelectCamera={handleSelectCamera}
         onTriggerScan={handleTriggerScan}
         onToggleAudio={handleToggleAudio}
+        onUploadMusic={handleUploadMusic}
+        onToggleCustomMusic={handleToggleCustomMusic}
+        onClearCustomMusic={handleClearCustomMusic}
         onInteractCargo={handleInteractCargo}
+        onEatWorm={handleEatWorm}
         onResetCargoRun={handleResetCargoRun}
+        onCraftEquipment={handleCraftEquipment}
+        onDeployLadder={handleDeployLadder}
+        onDeployAnchor={handleDeployAnchor}
+        onToggleCart={handleToggleCart}
+        onShiftToCart={handleShiftToCart}
         onTouchMove={handleTouchMove}
         onJump={handleJump}
+        onOpenMenu={handleOpenMenu}
+        onCloseMenu={handleCloseMenu}
+        onExitToTitle={handleExitToTitle}
+        onNewGame={handleNewGame}
+        onSaveSlot={handleSaveSlot}
+        onLoadSlot={handleLoadSlot}
+        onDeleteSlot={handleDeleteSlot}
+        onChangePlayerName={handleChangePlayerName}
       />
     </main>
   );
 }
+

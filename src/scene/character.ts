@@ -1,13 +1,21 @@
 import * as THREE from 'three';
+import { FootstepSurface } from './audio';
 import { ProceduralTextureSet } from './materials';
 import {
   BoundaryImpact,
   ObstacleCollider,
   SEA_LEVEL,
+  desertRockCoverageAt,
   groundHeightAt,
   groundNormalAt,
   resolveCharacterCollisions,
 } from './terrain';
+
+export interface FootstepEvent {
+  surface: FootstepSurface;
+  heavyCargo: boolean;
+  weightKg: number;
+}
 
 export interface CharacterInputState {
   forward: number; // -1..1
@@ -15,6 +23,12 @@ export interface CharacterInputState {
   sprint: boolean;
   jumpPressed: boolean;
   cameraYaw: number;
+  anchorAssist?: boolean;
+  rainWeight?: number;
+  snowWeight?: number;
+  insideBuilding?: boolean;
+  buildingName?: string | null;
+  surfaceHeightResolver?: (x: number, z: number, terrainY: number) => number;
 }
 
 export interface CharacterController {
@@ -26,19 +40,40 @@ export interface CharacterController {
   isGrounded: boolean;
   isSprinting: boolean;
   isWading: boolean;
+  health: number;
+  maxHealth: number;
+  playerName: string;
   stamina: number;
   staminaExhausted: boolean;
   staminaCooldownRemaining: number;
+  cold: number;
+  insideBuilding: boolean;
+  buildingName: string | null;
   carriedWeightKg: number;
   lastBoundaryImpact: BoundaryImpact;
   setCarriedWeight: (weightKg: number) => void;
+  setPlayerName: (name: string) => void;
+  damage: (amount: number) => void;
+  applyWormFeeding: () => void;
+  restoreState: (state: {
+    x: number;
+    y: number;
+    z: number;
+    yaw: number;
+    health: number;
+    stamina: number;
+    staminaExhausted: boolean;
+    cold: number;
+    playerName: string;
+  }) => void;
+  resetState: () => void;
   triggerScan: () => void;
   update: (
     delta: number,
     elapsed: number,
     input: CharacterInputState,
     colliders: ObstacleCollider[],
-    onFootstep?: (wading: boolean) => void
+    onFootstep?: (event: FootstepEvent) => void
   ) => void;
   dispose: () => void;
 }
@@ -67,30 +102,58 @@ export function createDrifterCharacter(
   const initialZ = 18;
   root.position.set(0, groundHeightAt(0, initialZ), initialZ);
 
-  // Calibrated PBR Materials (varied roughness & metalness across adjacent parts)
+  // Calibrated PBR Materials for Technical Expedition Outerwear (strictly faceless)
   const jacketMat = new THREE.MeshStandardMaterial({
     map: textures.fabricMap,
-    color: 0x263848,
+    color: 0x2a3b4b,
     roughness: 0.72,
+    metalness: 0.08,
+  });
+  const jacketPanelMat = new THREE.MeshStandardMaterial({
+    map: textures.fabricMap,
+    color: 0x1e2833,
+    roughness: 0.78,
     metalness: 0.06,
   });
-  const pantsMat = new THREE.MeshStandardMaterial({
-    color: 0x191d22,
-    roughness: 0.85,
+  const hoodTrimMat = new THREE.MeshStandardMaterial({
+    map: textures.fabricMap,
+    color: 0x364758,
+    roughness: 0.68,
+    metalness: 0.08,
+  });
+  const facelessCowlMat = new THREE.MeshStandardMaterial({
+    color: 0x11151a,
+    roughness: 0.84,
     metalness: 0.04,
   });
+  const pantsMat = new THREE.MeshStandardMaterial({
+    map: textures.fabricMap,
+    color: 0x1b2026,
+    roughness: 0.84,
+    metalness: 0.04,
+  });
+  const armorPadMat = new THREE.MeshStandardMaterial({
+    color: 0x252b32,
+    roughness: 0.42,
+    metalness: 0.28,
+  });
+  const gloveMat = new THREE.MeshStandardMaterial({
+    color: 0x171a1f,
+    roughness: 0.56,
+    metalness: 0.12,
+  });
   const bootMat = new THREE.MeshStandardMaterial({
-    color: 0x101215,
-    roughness: 0.45,
+    color: 0x121519,
+    roughness: 0.46,
     metalness: 0.14,
   });
   const strapMat = new THREE.MeshStandardMaterial({
-    color: 0x2f353d,
+    color: 0x2e353d,
     roughness: 0.58,
-    metalness: 0.25,
+    metalness: 0.24,
   });
   const metalMat = new THREE.MeshStandardMaterial({
-    color: 0x8e99a6,
+    color: 0x95a0ad,
     roughness: 0.24,
     metalness: 0.88,
   });
@@ -103,16 +166,6 @@ export function createDrifterCharacter(
     color: 0xc29342,
     roughness: 0.28,
     metalness: 0.82,
-  });
-  const skinMat = new THREE.MeshStandardMaterial({
-    color: 0xc9a38b,
-    roughness: 0.68,
-    metalness: 0.02,
-  });
-  const hairMat = new THREE.MeshStandardMaterial({
-    color: 0x1e1916,
-    roughness: 0.82,
-    metalness: 0.04,
   });
   const podGlowMat = new THREE.MeshStandardMaterial({
     color: 0xffaa3b,
@@ -131,20 +184,23 @@ export function createDrifterCharacter(
 
   disposables.push(
     jacketMat,
+    jacketPanelMat,
+    hoodTrimMat,
+    facelessCowlMat,
     pantsMat,
+    armorPadMat,
+    gloveMat,
     bootMat,
     strapMat,
     metalMat,
     packMat,
     accentGoldMat,
-    skinMat,
-    hairMat,
     podGlowMat,
     scannerLightMat
   );
 
   // Soft contact shadow directly under boots
-  const shadowGeo = new THREE.CircleGeometry(0.45, 20);
+  const shadowGeo = new THREE.CircleGeometry(0.46, 20);
   shadowGeo.rotateX(-Math.PI / 2);
   const shadowMat = new THREE.MeshBasicMaterial({
     color: 0x050709,
@@ -157,70 +213,114 @@ export function createDrifterCharacter(
   root.add(contactShadow);
   disposables.push(shadowGeo, shadowMat);
 
-  // Hierarchical Articulated Human Rig (total height ~1.78m, bottom-center pivot y=0)
+  // Hierarchical Articulated Human Rig (total height ~1.80m, bottom-center pivot y=0)
   const pelvis = new THREE.Group();
   pelvis.position.set(0, 0.92, 0);
   root.add(pelvis);
 
-  const pelvisMeshGeo = new THREE.BoxGeometry(0.32, 0.14, 0.22);
+  const pelvisMeshGeo = new THREE.CylinderGeometry(0.175, 0.165, 0.17, 12);
+  pelvisMeshGeo.scale(1.12, 1.0, 0.78);
   const pelvisMesh = new THREE.Mesh(pelvisMeshGeo, pantsMat);
   pelvisMesh.castShadow = true;
   pelvis.add(pelvisMesh);
 
-  // Spine & Torso
+  // Tactical Utility Waist Belt & Buckle + Side Hip Gear Pouches
+  const beltGeo = new THREE.CylinderGeometry(0.184, 0.184, 0.055, 14);
+  beltGeo.scale(1.13, 1.0, 0.8);
+  const belt = new THREE.Mesh(beltGeo, strapMat);
+  belt.position.y = 0.045;
+  pelvis.add(belt);
+
+  const beltBuckleGeo = new THREE.BoxGeometry(0.07, 0.055, 0.03);
+  const beltBuckle = new THREE.Mesh(beltBuckleGeo, metalMat);
+  beltBuckle.position.set(0, 0.045, 0.15);
+  pelvis.add(beltBuckle);
+
+  const hipPouchGeo = new THREE.BoxGeometry(0.06, 0.11, 0.1);
+  const hipPouchL = new THREE.Mesh(hipPouchGeo, armorPadMat);
+  hipPouchL.position.set(0.21, 0.01, -0.01);
+  const hipPouchR = new THREE.Mesh(hipPouchGeo, armorPadMat);
+  hipPouchR.position.set(-0.21, 0.01, -0.01);
+  pelvis.add(hipPouchL, hipPouchR);
+
+  // Spine & Anatomical Parka Torso (sculpted LatheGeometry silhouette)
   const torso = new THREE.Group();
   torso.position.set(0, 0.08, 0);
   pelvis.add(torso);
 
-  const chestGeo = new THREE.CylinderGeometry(0.21, 0.17, 0.48, 10);
-  chestGeo.scale(1.12, 1.0, 0.72);
+  const torsoProfile: THREE.Vector2[] = [
+    new THREE.Vector2(0.185, -0.04), // Parka lower hem skirt
+    new THREE.Vector2(0.168, 0.09),  // Tapered waist
+    new THREE.Vector2(0.182, 0.22),  // Ribcage
+    new THREE.Vector2(0.212, 0.37),  // Broad upper chest
+    new THREE.Vector2(0.198, 0.48),  // Shoulder slope
+    new THREE.Vector2(0.125, 0.52),  // Collar base
+  ];
+  const chestGeo = new THREE.LatheGeometry(torsoProfile, 14);
+  chestGeo.scale(1.18, 1.0, 0.74);
   const chestMesh = new THREE.Mesh(chestGeo, jacketMat);
-  chestMesh.position.y = 0.25;
   chestMesh.castShadow = true;
   chestMesh.receiveShadow = true;
   torso.add(chestMesh);
 
-  // Weatherproof Jacket Collar / Folded Hood
-  const collarGeo = new THREE.TorusGeometry(0.14, 0.055, 8, 16);
-  collarGeo.rotateX(Math.PI / 2);
-  const collarMesh = new THREE.Mesh(collarGeo, jacketMat);
-  collarMesh.position.set(0, 0.49, -0.02);
+  // Reinforced Dark Shoulder Yoke & Front Storm-Flap Placket
+  const yokeGeo = new THREE.CylinderGeometry(0.145, 0.215, 0.16, 12);
+  yokeGeo.scale(1.18, 1.0, 0.74);
+  const yokeMesh = new THREE.Mesh(yokeGeo, jacketPanelMat);
+  yokeMesh.position.y = 0.43;
+  yokeMesh.castShadow = true;
+  torso.add(yokeMesh);
+
+  const placketGeo = new THREE.BoxGeometry(0.065, 0.5, 0.032);
+  const placket = new THREE.Mesh(placketGeo, jacketPanelMat);
+  placket.position.set(0, 0.24, 0.155);
+  torso.add(placket);
+
+  const pocketGeo = new THREE.BoxGeometry(0.1, 0.12, 0.03);
+  const chestPocket = new THREE.Mesh(pocketGeo, armorPadMat);
+  chestPocket.position.set(-0.1, 0.32, 0.145);
+  torso.add(chestPocket);
+
+  // High Insulated Storm Collar & Neck Gaiter Wrap
+  const collarGeo = new THREE.CylinderGeometry(0.118, 0.135, 0.12, 14);
+  const collarMesh = new THREE.Mesh(collarGeo, hoodTrimMat);
+  collarMesh.position.set(0, 0.525, 0);
   torso.add(collarMesh);
 
-  const hoodGeo = new THREE.BoxGeometry(0.24, 0.14, 0.16);
-  const hoodMesh = new THREE.Mesh(hoodGeo, jacketMat);
-  hoodMesh.position.set(0, 0.45, -0.14);
-  hoodMesh.rotation.x = 0.35;
-  torso.add(hoodMesh);
+  const collarRimGeo = new THREE.TorusGeometry(0.118, 0.036, 8, 16);
+  collarRimGeo.rotateX(Math.PI / 2);
+  const collarRim = new THREE.Mesh(collarRimGeo, jacketPanelMat);
+  collarRim.position.set(0, 0.575, 0);
+  torso.add(collarRim);
 
   // Tactical Harness Straps & Metallic Chest Clips
-  const strapGeo = new THREE.BoxGeometry(0.05, 0.48, 0.28);
+  const strapGeo = new THREE.BoxGeometry(0.052, 0.49, 0.31);
   const strapL = new THREE.Mesh(strapGeo, strapMat);
-  strapL.position.set(0.11, 0.26, 0.01);
+  strapL.position.set(0.115, 0.265, 0.005);
   const strapR = new THREE.Mesh(strapGeo, strapMat);
-  strapR.position.set(-0.11, 0.26, 0.01);
+  strapR.position.set(-0.115, 0.265, 0.005);
   torso.add(strapL, strapR);
 
-  const buckleGeo = new THREE.BoxGeometry(0.06, 0.04, 0.03);
+  const buckleGeo = new THREE.BoxGeometry(0.062, 0.042, 0.032);
   const buckleL = new THREE.Mesh(buckleGeo, metalMat);
-  buckleL.position.set(0.11, 0.26, 0.155);
+  buckleL.position.set(0.115, 0.26, 0.165);
   const buckleR = new THREE.Mesh(buckleGeo, metalMat);
-  buckleR.position.set(-0.11, 0.26, 0.155);
+  buckleR.position.set(-0.115, 0.26, 0.165);
   torso.add(buckleL, buckleR);
 
   // Chest-mounted Amber Pod Capsule
   const podHousingGeo = new THREE.CylinderGeometry(0.065, 0.065, 0.16, 12);
   const podHousing = new THREE.Mesh(podHousingGeo, podGlowMat);
-  podHousing.position.set(0.04, 0.2, 0.17);
+  podHousing.position.set(0.045, 0.21, 0.18);
   podHousing.rotation.z = 0.14;
   torso.add(podHousing);
 
-  const podCapGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.03, 12);
+  const podCapGeo = new THREE.CylinderGeometry(0.072, 0.072, 0.03, 12);
   const podCapTop = new THREE.Mesh(podCapGeo, metalMat);
-  podCapTop.position.set(0.03, 0.28, 0.17);
+  podCapTop.position.set(0.035, 0.29, 0.18);
   podCapTop.rotation.z = 0.14;
   const podCapBot = new THREE.Mesh(podCapGeo, metalMat);
-  podCapBot.position.set(0.05, 0.12, 0.17);
+  podCapBot.position.set(0.055, 0.13, 0.18);
   podCapBot.rotation.z = 0.14;
   torso.add(podCapTop, podCapBot);
 
@@ -249,17 +349,15 @@ export function createDrifterCharacter(
   disposables.push(frameSteelMat, pouchOliveMat, batteryYellowMat, webbingBlackMat);
 
   const holderGroup = new THREE.Group();
-  holderGroup.position.set(0, 0.08, -0.17);
+  holderGroup.position.set(0, 0.08, -0.18);
   torso.add(holderGroup);
 
-  // Backplate spine pad resting against the jacket
   const backPadGeo = new THREE.BoxGeometry(0.34, 0.44, 0.05);
   const backPad = new THREE.Mesh(backPadGeo, packMat);
   backPad.position.set(0, 0.22, -0.02);
   backPad.castShadow = true;
   holderGroup.add(backPad);
 
-  // Vertical galvanized tubular side rails
   const sideRailGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.56, 8);
   const railL = new THREE.Mesh(sideRailGeo, frameSteelMat);
   railL.position.set(-0.22, 0.25, -0.05);
@@ -269,7 +367,6 @@ export function createDrifterCharacter(
   railR.castShadow = true;
   holderGroup.add(railL, railR);
 
-  // Rear outer support uprights (creating the cargo cradle cage)
   const outerRailGeo = new THREE.CylinderGeometry(0.014, 0.014, 0.5, 8);
   const outerL = new THREE.Mesh(outerRailGeo, frameSteelMat);
   outerL.position.set(-0.22, 0.23, -0.25);
@@ -279,7 +376,6 @@ export function createDrifterCharacter(
   outerR.castShadow = true;
   holderGroup.add(outerL, outerR);
 
-  // Horizontal tubular crossbars (top, mid, bottom tray)
   const crossBarGeo = new THREE.CylinderGeometry(0.014, 0.014, 0.46, 8);
   crossBarGeo.rotateZ(Math.PI / 2);
   const crossTop = new THREE.Mesh(crossBarGeo, frameSteelMat);
@@ -292,7 +388,6 @@ export function createDrifterCharacter(
   crossBotFront.position.set(0, -0.01, -0.05);
   holderGroup.add(crossTop, crossMid, crossBotBack, crossBotFront);
 
-  // Bottom L-ledge tray side arms & solid fold-out platform plate
   const trayArmGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.24, 8);
   trayArmGeo.rotateX(Math.PI / 2);
   const trayArmL = new THREE.Mesh(trayArmGeo, frameSteelMat);
@@ -305,7 +400,6 @@ export function createDrifterCharacter(
   trayPlate.castShadow = true;
   holderGroup.add(trayArmL, trayArmR, trayPlate);
 
-  // Tension straps & buckles securing cargo inside the holder
   const cinchStrapGeo = new THREE.BoxGeometry(0.46, 0.04, 0.24);
   const cinchStrap = new THREE.Mesh(cinchStrapGeo, webbingBlackMat);
   cinchStrap.position.set(0, 0.18, -0.15);
@@ -318,7 +412,6 @@ export function createDrifterCharacter(
   bklR.position.set(0.235, 0.18, -0.15);
   holderGroup.add(bklL, bklR);
 
-  // Side Olive Utility Panel + Yellow Auxiliary Battery & Pouches (right side of frame)
   const sidePanelGeo = new THREE.BoxGeometry(0.025, 0.42, 0.22);
   const sidePanel = new THREE.Mesh(sidePanelGeo, pouchOliveMat);
   sidePanel.position.set(0.235, 0.22, -0.15);
@@ -403,44 +496,67 @@ export function createDrifterCharacter(
     petals.push(petal);
   }
 
-  // Head & Neck
+  // Faceless Hooded Head & High-Collar Storm Hood (Strictly NO FACE)
   const headGroup = new THREE.Group();
-  headGroup.position.set(0, 0.54, 0.01);
+  headGroup.position.set(0, 0.56, 0.01);
   torso.add(headGroup);
 
-  const neckGeo = new THREE.CylinderGeometry(0.055, 0.065, 0.1, 8);
-  const neck = new THREE.Mesh(neckGeo, skinMat);
-  neck.position.y = 0.03;
-  headGroup.add(neck);
+  const neckGaiterGeo = new THREE.CylinderGeometry(0.072, 0.088, 0.11, 12);
+  const neckGaiter = new THREE.Mesh(neckGaiterGeo, facelessCowlMat);
+  neckGaiter.position.y = 0.035;
+  headGroup.add(neckGaiter);
 
-  const craniumGeo = new THREE.SphereGeometry(0.115, 14, 12);
-  craniumGeo.scale(0.88, 1.06, 0.96);
-  const cranium = new THREE.Mesh(craniumGeo, skinMat);
-  cranium.position.y = 0.15;
-  cranium.castShadow = true;
-  headGroup.add(cranium);
+  // Smooth featureless matte dark balaclava head silhouette (zero facial features)
+  const cowlHeadGeo = new THREE.SphereGeometry(0.11, 16, 14);
+  cowlHeadGeo.scale(0.84, 1.04, 0.94);
+  const cowlHead = new THREE.Mesh(cowlHeadGeo, facelessCowlMat);
+  cowlHead.position.set(0, 0.15, 0.008);
+  cowlHead.castShadow = true;
+  headGroup.add(cowlHead);
 
-  const hairCapGeo = new THREE.SphereGeometry(0.122, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.62);
-  hairCapGeo.scale(0.9, 1.05, 1.02);
-  const hairCap = new THREE.Mesh(hairCapGeo, hairMat);
-  hairCap.position.set(0, 0.165, -0.015);
-  hairCap.rotation.x = -0.22;
-  headGroup.add(hairCap);
+  // Raised Weatherproof Storm Hood Shell wrapping back/crown/cheeks
+  const hoodOuterGeo = new THREE.SphereGeometry(
+    0.132,
+    16,
+    14,
+    -Math.PI * 0.68,
+    Math.PI * 1.36,
+    0,
+    Math.PI * 0.72
+  );
+  hoodOuterGeo.scale(0.92, 1.06, 1.08);
+  const hoodOuter = new THREE.Mesh(hoodOuterGeo, jacketMat);
+  hoodOuter.position.set(0, 0.155, -0.022);
+  hoodOuter.rotation.set(-0.18, Math.PI, 0);
+  hoodOuter.castShadow = true;
+  headGroup.add(hoodOuter);
 
-  const hairBackGeo = new THREE.BoxGeometry(0.15, 0.12, 0.08);
-  const hairBack = new THREE.Mesh(hairBackGeo, hairMat);
-  hairBack.position.set(0, 0.1, -0.09);
-  headGroup.add(hairBack);
+  // Hood brow peak / rain visor overhang
+  const hoodBrimGeo = new THREE.TorusGeometry(0.112, 0.024, 8, 18, Math.PI * 1.25);
+  const hoodBrim = new THREE.Mesh(hoodBrimGeo, hoodTrimMat);
+  hoodBrim.position.set(0, 0.155, 0.045);
+  hoodBrim.rotation.set(0.32, 0, -Math.PI * 0.125);
+  headGroup.add(hoodBrim);
 
-  // Articulated Arms
-  const upperArmGeo = new THREE.CylinderGeometry(0.052, 0.044, 0.28, 8);
-  const forearmGeo = new THREE.CylinderGeometry(0.042, 0.034, 0.26, 8);
-  const handGeo = new THREE.SphereGeometry(0.036, 8, 8);
+  // Articulated Sleeved Arms with Shoulder Guards, Elbow Pads & Gloved Hands
+  const shoulderPadGeo = new THREE.SphereGeometry(0.074, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.58);
+  shoulderPadGeo.scale(1.05, 0.85, 1.12);
+  const upperArmGeo = new THREE.CylinderGeometry(0.058, 0.048, 0.28, 10);
+  const elbowPadGeo = new THREE.BoxGeometry(0.068, 0.072, 0.055);
+  const forearmGeo = new THREE.CylinderGeometry(0.048, 0.037, 0.25, 10);
+  const glovePalmGeo = new THREE.BoxGeometry(0.052, 0.075, 0.064);
+  const gloveFingerGeo = new THREE.BoxGeometry(0.048, 0.052, 0.045);
 
   const buildArm = (side: number) => {
     const shoulder = new THREE.Group();
-    shoulder.position.set(side * 0.245, 0.44, 0);
+    shoulder.position.set(side * 0.255, 0.44, 0);
     torso.add(shoulder);
+
+    const shoulderPad = new THREE.Mesh(shoulderPadGeo, armorPadMat);
+    shoulderPad.position.set(side * 0.008, 0.015, 0);
+    shoulderPad.rotation.z = -side * 0.35;
+    shoulderPad.castShadow = true;
+    shoulder.add(shoulderPad);
 
     const upper = new THREE.Mesh(upperArmGeo, jacketMat);
     upper.position.y = -0.14;
@@ -451,20 +567,24 @@ export function createDrifterCharacter(
     elbow.position.set(0, -0.28, 0);
     shoulder.add(elbow);
 
-    const forearm = new THREE.Mesh(forearmGeo, jacketMat);
-    forearm.position.y = -0.13;
+    const elbowPad = new THREE.Mesh(elbowPadGeo, armorPadMat);
+    elbowPad.position.set(0, 0.01, -0.022);
+    elbow.add(elbowPad);
+
+    const forearm = new THREE.Mesh(forearmGeo, jacketPanelMat);
+    forearm.position.y = -0.125;
     forearm.castShadow = true;
     elbow.add(forearm);
 
-    const cuffGeo = new THREE.CylinderGeometry(0.037, 0.037, 0.04, 8);
+    const cuffGeo = new THREE.CylinderGeometry(0.041, 0.04, 0.048, 10);
     const cuff = new THREE.Mesh(cuffGeo, strapMat);
-    cuff.position.y = -0.24;
+    cuff.position.y = -0.235;
     elbow.add(cuff);
     disposables.push(cuffGeo);
 
-    // Subtle glowing cufflink band on right wrist (matching Death Stranding Porter silhouette)
+    // Iconic glowing cufflink band on right wrist
     if (side < 0) {
-      const linkGeo = new THREE.TorusGeometry(0.039, 0.006, 6, 14);
+      const linkGeo = new THREE.TorusGeometry(0.043, 0.006, 6, 14);
       linkGeo.rotateX(Math.PI / 2);
       const linkMat = new THREE.MeshStandardMaterial({
         color: 0xe6f8ff,
@@ -473,14 +593,20 @@ export function createDrifterCharacter(
         roughness: 0.2,
       });
       const cufflink = new THREE.Mesh(linkGeo, linkMat);
-      cufflink.position.y = -0.245;
+      cufflink.position.y = -0.242;
       elbow.add(cufflink);
       disposables.push(linkGeo, linkMat);
     }
 
-    const hand = new THREE.Mesh(handGeo, skinMat);
-    hand.position.y = -0.28;
-    elbow.add(hand);
+    // Weatherproof Gloved Hand (zero bare skin)
+    const handGroup = new THREE.Group();
+    handGroup.position.set(0, -0.285, 0.005);
+    const palm = new THREE.Mesh(glovePalmGeo, gloveMat);
+    const fingers = new THREE.Mesh(gloveFingerGeo, gloveMat);
+    fingers.position.set(0, -0.052, 0.01);
+    fingers.rotation.x = 0.22;
+    handGroup.add(palm, fingers);
+    elbow.add(handGroup);
 
     return { shoulder, elbow };
   };
@@ -488,9 +614,11 @@ export function createDrifterCharacter(
   const leftArm = buildArm(1);
   const rightArm = buildArm(-1);
 
-  // Articulated Legs & Heavy All-Terrain Boots
-  const thighGeo = new THREE.CylinderGeometry(0.075, 0.06, 0.42, 10);
-  const shinGeo = new THREE.CylinderGeometry(0.058, 0.048, 0.4, 10);
+  // Articulated Layered Trousers, Cargo Pockets, Knee Pads & Multi-Part All-Terrain Boots
+  const thighGeo = new THREE.CylinderGeometry(0.084, 0.066, 0.42, 12);
+  const cargoPocketGeo = new THREE.BoxGeometry(0.045, 0.14, 0.11);
+  const kneePadGeo = new THREE.BoxGeometry(0.092, 0.095, 0.055);
+  const shinGeo = new THREE.CylinderGeometry(0.064, 0.052, 0.4, 12);
   const legStripeGeo = new THREE.BoxGeometry(0.016, 0.36, 0.025);
   const stripeMat = new THREE.MeshStandardMaterial({
     color: 0xa94228,
@@ -498,12 +626,16 @@ export function createDrifterCharacter(
     metalness: 0.05,
   });
   disposables.push(legStripeGeo, stripeMat);
-  const bootUpperGeo = new THREE.BoxGeometry(0.11, 0.1, 0.22);
-  const bootSoleGeo = new THREE.BoxGeometry(0.118, 0.035, 0.24);
+
+  const bootShaftGeo = new THREE.CylinderGeometry(0.062, 0.058, 0.11, 10);
+  const bootUpperGeo = new THREE.BoxGeometry(0.112, 0.088, 0.22);
+  const bootToeGeo = new THREE.SphereGeometry(0.058, 10, 8);
+  bootToeGeo.scale(0.95, 0.72, 1.15);
+  const bootSoleGeo = new THREE.BoxGeometry(0.12, 0.036, 0.245);
 
   const buildLeg = (side: number) => {
     const hip = new THREE.Group();
-    hip.position.set(side * 0.105, -0.02, 0);
+    hip.position.set(side * 0.108, -0.02, 0);
     pelvis.add(hip);
 
     const thigh = new THREE.Mesh(thighGeo, pantsMat);
@@ -511,13 +643,22 @@ export function createDrifterCharacter(
     thigh.castShadow = true;
     hip.add(thigh);
 
+    const cargoPocket = new THREE.Mesh(cargoPocketGeo, strapMat);
+    cargoPocket.position.set(side * 0.068, -0.2, 0.01);
+    hip.add(cargoPocket);
+
     const thighStripe = new THREE.Mesh(legStripeGeo, stripeMat);
-    thighStripe.position.set(side * 0.066, -0.21, 0);
+    thighStripe.position.set(side * 0.075, -0.21, -0.02);
     hip.add(thighStripe);
 
     const knee = new THREE.Group();
     knee.position.set(0, -0.42, 0);
     hip.add(knee);
+
+    const kneePad = new THREE.Mesh(kneePadGeo, armorPadMat);
+    kneePad.position.set(0, 0.01, 0.052);
+    kneePad.castShadow = true;
+    knee.add(kneePad);
 
     const shin = new THREE.Mesh(shinGeo, pantsMat);
     shin.position.y = -0.2;
@@ -525,20 +666,28 @@ export function createDrifterCharacter(
     knee.add(shin);
 
     const shinStripe = new THREE.Mesh(legStripeGeo, stripeMat);
-    shinStripe.position.set(side * 0.052, -0.19, 0);
+    shinStripe.position.set(side * 0.057, -0.19, 0);
     knee.add(shinStripe);
 
     const ankle = new THREE.Group();
     ankle.position.set(0, -0.4, 0);
     knee.add(ankle);
 
+    const bootShaft = new THREE.Mesh(bootShaftGeo, bootMat);
+    bootShaft.position.set(0, 0.015, 0);
+    ankle.add(bootShaft);
+
     const boot = new THREE.Mesh(bootUpperGeo, bootMat);
-    boot.position.set(0, -0.04, 0.04);
+    boot.position.set(0, -0.042, 0.04);
     boot.castShadow = true;
     ankle.add(boot);
 
+    const toeCap = new THREE.Mesh(bootToeGeo, armorPadMat);
+    toeCap.position.set(0, -0.05, 0.135);
+    ankle.add(toeCap);
+
     const sole = new THREE.Mesh(bootSoleGeo, strapMat);
-    sole.position.set(0, -0.09, 0.04);
+    sole.position.set(0, -0.09, 0.042);
     ankle.add(sole);
 
     return { hip, knee, ankle };
@@ -549,9 +698,15 @@ export function createDrifterCharacter(
 
   disposables.push(
     pelvisMeshGeo,
+    beltGeo,
+    beltBuckleGeo,
+    hipPouchGeo,
     chestGeo,
+    yokeGeo,
+    placketGeo,
+    pocketGeo,
     collarGeo,
-    hoodGeo,
+    collarRimGeo,
     strapGeo,
     buckleGeo,
     podHousingGeo,
@@ -559,18 +714,78 @@ export function createDrifterCharacter(
     armLowerGeo,
     scannerCoreGeo,
     petalGeo,
-    neckGeo,
-    craniumGeo,
-    hairCapGeo,
-    hairBackGeo,
+    neckGaiterGeo,
+    cowlHeadGeo,
+    hoodOuterGeo,
+    hoodBrimGeo,
+    shoulderPadGeo,
     upperArmGeo,
+    elbowPadGeo,
     forearmGeo,
-    handGeo,
+    glovePalmGeo,
+    gloveFingerGeo,
     thighGeo,
+    cargoPocketGeo,
+    kneePadGeo,
     shinGeo,
+    bootShaftGeo,
     bootUpperGeo,
+    bootToeGeo,
     bootSoleGeo
   );
+
+  // Floating 3D Nameplate Indicator Above Player Head
+  const nameCanvas = document.createElement('canvas');
+  nameCanvas.width = 384;
+  nameCanvas.height = 84;
+  const nameTexture = new THREE.CanvasTexture(nameCanvas);
+  nameTexture.colorSpace = THREE.SRGBColorSpace;
+  nameTexture.minFilter = THREE.LinearFilter;
+  nameTexture.magFilter = THREE.LinearFilter;
+
+  const nameSpriteMat = new THREE.SpriteMaterial({
+    map: nameTexture,
+    transparent: true,
+    depthWrite: false,
+  });
+  const nameSprite = new THREE.Sprite(nameSpriteMat);
+  nameSprite.position.set(0, 2.22, 0);
+  nameSprite.scale.set(1.22, 0.27, 1);
+  root.add(nameSprite);
+  disposables.push(nameTexture, nameSpriteMat);
+
+  let playerName = 'Drifter';
+  const drawNameBadge = (rawName: string) => {
+    const clean = rawName.trim().slice(0, 20) || 'Drifter';
+    playerName = clean;
+    const ctx = nameCanvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, nameCanvas.width, nameCanvas.height);
+
+    ctx.font = '600 28px "Inter", system-ui, -apple-system, sans-serif';
+    const textW = Math.min(330, Math.ceil(ctx.measureText(clean).width));
+    const pillW = Math.max(112, textW + 40);
+    const pillH = 50;
+    const rx = (nameCanvas.width - pillW) / 2;
+    const ry = (nameCanvas.height - pillH) / 2;
+
+    ctx.fillStyle = 'rgba(12, 16, 22, 0.78)';
+    ctx.beginPath();
+    ctx.roundRect(rx, ry, pillW, pillH, 10);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(245, 184, 61, 0.65)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = '#f1f5f9';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(clean, nameCanvas.width / 2, nameCanvas.height / 2 + 1, 330);
+
+    nameTexture.needsUpdate = true;
+  };
+  drawNameBadge(playerName);
 
   scene.add(root);
 
@@ -600,7 +815,6 @@ export function createDrifterCharacter(
   let fpCursor = 0;
   const spawnFootprint = (worldX: number, worldZ: number, headingYaw: number, side: number) => {
     const h = groundHeightAt(worldX, worldZ);
-    // Don't leave prints in deep water
     if (h < SEA_LEVEL - 0.12) return;
 
     const entry = footprints[fpCursor];
@@ -625,18 +839,21 @@ export function createDrifterCharacter(
     entry.mat.opacity = h < 0.6 ? 0.72 : 0.52;
   };
 
-  // Physics, Weight, Stamina & Cooldown State
+  // Physics, Health, Weight, Stamina, Cold & Cooldown State
   const velocity = new THREE.Vector3();
   let verticalVel = 0;
   let isGrounded = true;
-  let yaw = Math.PI; // Facing toward the ocean initially
+  let yaw = Math.PI;
   let stridePhase = 0;
   let lastStepHalf = 0;
   let scanTimer = 0;
   let landCompression = 0;
+  const maxHealth = 100;
+  let health = 100;
   let stamina = 100;
   let staminaExhausted = false;
   let staminaCooldownRemaining = 0;
+  let cold = 14;
   let carriedWeightKg = 0;
 
   const triggerScan = () => {
@@ -648,6 +865,89 @@ export function createDrifterCharacter(
     controller.carriedWeightKg = carriedWeightKg;
   };
 
+  const setPlayerName = (name: string) => {
+    drawNameBadge(name);
+    controller.playerName = playerName;
+  };
+
+  const damage = (amount: number) => {
+    health = Math.max(0, health - Math.max(0, amount));
+    controller.health = health;
+  };
+
+  const applyWormFeeding = () => {
+    health = Math.min(maxHealth, health + 18);
+    stamina = Math.min(100, stamina + 38);
+    staminaExhausted = false;
+    staminaCooldownRemaining = 0;
+    cold = Math.max(0, cold - 30);
+    controller.health = health;
+    controller.stamina = stamina;
+    controller.staminaExhausted = false;
+    controller.staminaCooldownRemaining = 0;
+    controller.cold = cold;
+  };
+
+  const restoreState = (state: {
+    x: number;
+    y: number;
+    z: number;
+    yaw: number;
+    health: number;
+    stamina: number;
+    staminaExhausted: boolean;
+    cold: number;
+    playerName: string;
+  }) => {
+    root.position.set(state.x, state.y, state.z);
+    velocity.set(0, 0, 0);
+    verticalVel = 0;
+    isGrounded = true;
+    yaw = state.yaw;
+    root.rotation.y = yaw;
+    health = THREE.MathUtils.clamp(state.health, 0, maxHealth);
+    stamina = THREE.MathUtils.clamp(state.stamina, 0, 100);
+    staminaExhausted = state.staminaExhausted;
+    staminaCooldownRemaining = state.staminaExhausted ? 1.5 : 0;
+    cold = THREE.MathUtils.clamp(state.cold, 0, 100);
+    drawNameBadge(state.playerName);
+    controller.yaw = yaw;
+    controller.health = health;
+    controller.stamina = stamina;
+    controller.staminaExhausted = staminaExhausted;
+    controller.staminaCooldownRemaining = staminaCooldownRemaining;
+    controller.cold = cold;
+    controller.playerName = playerName;
+  };
+
+  const resetState = () => {
+    restoreState({
+      x: 0,
+      y: groundHeightAt(0, initialZ),
+      z: initialZ,
+      yaw: Math.PI,
+      health: maxHealth,
+      stamina: 100,
+      staminaExhausted: false,
+      cold: 14,
+      playerName,
+    });
+    setCarriedWeight(0);
+  };
+
+  const resolveFootstepSurface = (
+    x: number,
+    z: number,
+    groundY: number,
+    onBridgeLadder: boolean,
+    insideBuilding: boolean
+  ): FootstepSurface => {
+    if (groundY < SEA_LEVEL + 0.08) return 'surf';
+    if (onBridgeLadder || insideBuilding) return 'wood';
+    if (desertRockCoverageAt(x, z, groundY) > 0.45) return 'rock';
+    return 'sand';
+  };
+
   const controller: CharacterController = {
     group: root,
     backpackMount,
@@ -657,17 +957,28 @@ export function createDrifterCharacter(
     isGrounded: true,
     isSprinting: false,
     isWading: false,
+    health,
+    maxHealth,
+    playerName,
     stamina,
     staminaExhausted,
     staminaCooldownRemaining,
+    cold,
+    insideBuilding: false,
+    buildingName: null,
     carriedWeightKg,
     lastBoundaryImpact: { hit: false, x: 0, z: 0, nx: 0, nz: 0 },
     setCarriedWeight,
+    setPlayerName,
+    damage,
+    applyWormFeeding,
+    restoreState,
+    resetState,
     triggerScan,
     update: (delta, elapsed, input, colliders, onFootstep) => {
       const dt = Math.min(delta, 0.05);
 
-      // Compute camera-relative movement direction
+      // Camera-relative movement direction
       _camForward.set(-Math.sin(input.cameraYaw), 0, -Math.cos(input.cameraYaw));
       _camRight.set(Math.cos(input.cameraYaw), 0, -Math.sin(input.cameraYaw));
 
@@ -679,15 +990,15 @@ export function createDrifterCharacter(
       const hasInput = _moveDir.lengthSq() > 0.001;
       if (hasInput) _moveDir.normalize();
 
-      // Carried weight factor (0..1.2) affects agility & stamina drain
       const loadRatio = THREE.MathUtils.clamp(carriedWeightKg / 72, 0, 1.2);
+      const coldPenalty = cold >= 70 ? 0.9 : 1.0;
       const canSprint = !staminaExhausted && stamina > 1.5;
       const wantsSprint = input.sprint && hasInput && canSprint;
 
       const walkSpeed = staminaExhausted
-        ? 2.35
-        : 3.35 * (1 - loadRatio * 0.22);
-      const sprintSpeed = 6.7 * (1 - loadRatio * 0.25);
+        ? 2.35 * coldPenalty
+        : 3.35 * (1 - loadRatio * 0.22) * coldPenalty;
+      const sprintSpeed = 6.7 * (1 - loadRatio * 0.25) * coldPenalty;
       const maxSpeed = wantsSprint ? sprintSpeed : walkSpeed;
 
       const targetVx = hasInput ? _moveDir.x * maxSpeed : 0;
@@ -702,10 +1013,51 @@ export function createDrifterCharacter(
       const actuallySprinting = wantsSprint && horizSpeed > walkSpeed + 0.5;
       controller.isSprinting = actuallySprinting;
 
-      // Apply horizontal velocity and resolve obstacles & invisible perimeter wall
-      root.position.x += velocity.x * dt;
-      root.position.z += velocity.z * dt;
-      const impact = resolveCharacterCollisions(root.position, colliders, 0.45);
+      // Apply horizontal velocity, steep cliff blocking, and obstacle/wall collisions
+      const prevX = root.position.x;
+      const prevZ = root.position.z;
+      const prevTerrainY = groundHeightAt(prevX, prevZ);
+
+      let nextX = prevX + velocity.x * dt;
+      let nextZ = prevZ + velocity.z * dt;
+      const nextTerrainY = groundHeightAt(nextX, nextZ);
+      const nextSurfaceY = input.surfaceHeightResolver
+        ? input.surfaceHeightResolver(nextX, nextZ, nextTerrainY)
+        : nextTerrainY;
+      const onBridgeLadder = nextSurfaceY > nextTerrainY + 0.03;
+
+      if (!onBridgeLadder) {
+        groundNormalAt(nextX, nextZ, _surfNorm);
+        if (_surfNorm.y < 0.74 && nextTerrainY > prevTerrainY + 0.015) {
+          const nx = _surfNorm.x;
+          const nz = _surfNorm.z;
+          const hLen = Math.hypot(nx, nz);
+          if (hLen > 1e-4) {
+            const downX = nx / hLen;
+            const downZ = nz / hLen;
+            const intoSlope = velocity.x * downX + velocity.z * downZ;
+            if (intoSlope < 0) {
+              velocity.x -= downX * intoSlope;
+              velocity.z -= downZ * intoSlope;
+            }
+            nextX = prevX + velocity.x * dt;
+            nextZ = prevZ + velocity.z * dt;
+            if (_surfNorm.y < 0.64) {
+              nextX += downX * 0.85 * dt;
+              nextZ += downZ * 0.85 * dt;
+            }
+          }
+        }
+      }
+
+      root.position.x = nextX;
+      root.position.z = nextZ;
+
+      const impact = resolveCharacterCollisions(
+        root.position,
+        onBridgeLadder ? [] : colliders,
+        0.45
+      );
       controller.lastBoundaryImpact = impact;
       if (impact.hit) {
         const dot = velocity.x * impact.nx + velocity.z * impact.nz;
@@ -715,22 +1067,35 @@ export function createDrifterCharacter(
         }
       }
 
-      // Ground height & vertical jump physics (jump costs stamina, blocked during exhaustion cooldown)
-      const groundY = groundHeightAt(root.position.x, root.position.z);
-      const jumpCost = 12 + carriedWeightKg * 0.14;
+      const groundY = input.surfaceHeightResolver
+        ? input.surfaceHeightResolver(
+            root.position.x,
+            root.position.z,
+            groundHeightAt(root.position.x, root.position.z)
+          )
+        : groundHeightAt(root.position.x, root.position.z);
+
+      const anchorDrainMult = input.anchorAssist ? 0.45 : 1.0;
+      const anchorRegenMult = input.anchorAssist ? 1.45 : 1.0;
+
+      const jumpCost = (12 + carriedWeightKg * 0.14) * anchorDrainMult;
       if (input.jumpPressed && isGrounded && !staminaExhausted && stamina >= 8) {
         verticalVel = 5.4 - loadRatio * 0.45;
         isGrounded = false;
         stamina = Math.max(0, stamina - jumpCost);
       }
 
-      // Update Stamina & Exhaustion Cooldown System
+      // Stamina & Exhaustion Cooldown
+      const coldRegenMult = cold >= 70 ? 0.72 : 1.0;
       if (actuallySprinting) {
-        const drainRate = 13.5 + carriedWeightKg * 0.26;
+        const drainRate = (13.5 + carriedWeightKg * 0.26) * anchorDrainMult;
         stamina = Math.max(0, stamina - drainRate * dt);
       } else if (isGrounded) {
         const baseRegen = hasInput ? 11.5 : 22.0;
-        const regenRate = Math.max(4.5, baseRegen - loadRatio * 5.0);
+        const regenRate = Math.max(
+          4.0,
+          (baseRegen - loadRatio * 5.0) * anchorRegenMult * coldRegenMult
+        );
         stamina = Math.min(100, stamina + regenRate * dt);
       }
 
@@ -751,6 +1116,34 @@ export function createDrifterCharacter(
       controller.staminaExhausted = staminaExhausted;
       controller.staminaCooldownRemaining = staminaCooldownRemaining;
 
+      const wading = groundY < SEA_LEVEL + 0.08;
+      controller.isWading = wading;
+
+      const insideBuilding = Boolean(input.insideBuilding);
+      controller.insideBuilding = insideBuilding;
+      controller.buildingName = input.buildingName ?? null;
+
+      // Cold Feeling / Thermal Exposure Update (drops rapidly inside sheltered buildings)
+      if (insideBuilding) {
+        cold = Math.max(0, cold - 18.0 * dt);
+        if (cold < 45 && health < maxHealth) {
+          health = Math.min(maxHealth, health + 2.2 * dt);
+        }
+      } else {
+        const snowChill = (input.snowWeight ?? 0) * 2.45;
+        const rainChill = (input.rainWeight ?? 0) * 1.15;
+        const surfChill = wading ? 3.4 : 0;
+        const altitudeChill = root.position.y > 5 ? Math.min(1.65, (root.position.y - 5) * 0.11) : 0;
+        const exertionWarmth = actuallySprinting && !wading ? -0.55 : 0;
+        const coldRate = 0.22 + snowChill + rainChill + surfChill + altitudeChill + exertionWarmth;
+        cold = THREE.MathUtils.clamp(cold + coldRate * dt, 0, 100);
+        if (cold >= 98) {
+          health = Math.max(5, health - 0.8 * dt);
+        }
+      }
+      controller.cold = cold;
+      controller.health = health;
+
       if (!isGrounded) {
         verticalVel -= 15.5 * dt;
         root.position.y += verticalVel * dt;
@@ -761,15 +1154,23 @@ export function createDrifterCharacter(
           landCompression = 0.14;
           spawnFootprint(root.position.x, root.position.z, yaw, 1);
           spawnFootprint(root.position.x, root.position.z, yaw, -1);
-          onFootstep?.(groundY < SEA_LEVEL + 0.08);
+          onFootstep?.({
+            surface: resolveFootstepSurface(
+              root.position.x,
+              root.position.z,
+              groundY,
+              onBridgeLadder,
+              insideBuilding
+            ),
+            heavyCargo: carriedWeightKg >= 12,
+            weightKg: carriedWeightKg,
+          });
         }
       } else {
         root.position.y = THREE.MathUtils.damp(root.position.y, groundY, 20, dt);
       }
 
       controller.isGrounded = isGrounded;
-      const wading = groundY < SEA_LEVEL + 0.08;
-      controller.isWading = wading;
 
       // Smooth character yaw toward movement direction
       if (horizSpeed > 0.2) {
@@ -793,7 +1194,17 @@ export function createDrifterCharacter(
           lastStepHalf = currentHalf;
           const side = currentHalf % 2 === 0 ? 1 : -1;
           spawnFootprint(root.position.x, root.position.z, yaw, side);
-          onFootstep?.(wading);
+          onFootstep?.({
+            surface: resolveFootstepSurface(
+              root.position.x,
+              root.position.z,
+              groundY,
+              onBridgeLadder,
+              insideBuilding
+            ),
+            heavyCargo: carriedWeightKg >= 12,
+            weightKg: carriedWeightKg,
+          });
         }
       }
 
@@ -804,20 +1215,18 @@ export function createDrifterCharacter(
       const legAmp = THREE.MathUtils.lerp(0.55, 0.88, sprintBlend) * moveWeight;
       const armAmp = THREE.MathUtils.lerp(0.45, 0.78, sprintBlend) * moveWeight;
 
-      // Idle breathing (faster heave when exhausted)
       const breatheSpeed = staminaExhausted ? 4.4 : 2.1;
       const breatheAmp = staminaExhausted ? 0.032 : 0.015;
       const breathe = Math.sin(elapsed * breatheSpeed) * breatheAmp;
-      const idleSway = Math.sin(elapsed * 0.9) * 0.02 * (1 - moveWeight);
+      const shiver = cold >= 70 && !insideBuilding ? Math.sin(elapsed * 26) * 0.008 * (1 - moveWeight) : 0;
+      const idleSway = Math.sin(elapsed * 0.9) * 0.02 * (1 - moveWeight) + shiver;
 
-      // Pelvis height bob & twist
       const strideBob = Math.abs(swingCos) * 0.045 * moveWeight;
       const jumpTuck = !isGrounded ? 0.06 : 0;
       pelvis.position.y = 0.92 - strideBob - landCompression + jumpTuck;
       pelvis.rotation.y = swing * 0.1 * moveWeight;
       pelvis.rotation.z = idleSway;
 
-      // Torso forward lean & counter-twist (compensates for heavy cargo weight)
       const weightLean = loadRatio * 0.13 + (staminaExhausted ? 0.08 : 0);
       torso.rotation.x =
         THREE.MathUtils.lerp(0.05, 0.22, sprintBlend) * moveWeight +
@@ -826,15 +1235,15 @@ export function createDrifterCharacter(
         landCompression * 0.8;
       torso.rotation.y = -swing * 0.12 * moveWeight;
 
-      // Head stabilization & subtle look into breeze
       headGroup.rotation.x = -torso.rotation.x * 0.55 + breathe * 0.5;
-      headGroup.rotation.y = Math.sin(elapsed * 0.55) * 0.06 * (1 - moveWeight);
+      headGroup.rotation.y = Math.sin(elapsed * 0.55) * 0.06 * (1 - moveWeight) + shiver * 1.4;
 
-      // Legs & Knees
       const leftHipAngle = swing * legAmp;
       const rightHipAngle = -swing * legAmp;
-      const leftKneeBend = Math.max(0, -swingCos) * (0.65 + sprintBlend * 0.45) * moveWeight + (!isGrounded ? 0.4 : 0);
-      const rightKneeBend = Math.max(0, swingCos) * (0.65 + sprintBlend * 0.45) * moveWeight + (!isGrounded ? 0.25 : 0);
+      const leftKneeBend =
+        Math.max(0, -swingCos) * (0.65 + sprintBlend * 0.45) * moveWeight + (!isGrounded ? 0.4 : 0);
+      const rightKneeBend =
+        Math.max(0, swingCos) * (0.65 + sprintBlend * 0.45) * moveWeight + (!isGrounded ? 0.25 : 0);
 
       leftLeg.hip.rotation.x = leftHipAngle - landCompression * 1.4;
       rightLeg.hip.rotation.x = rightHipAngle - landCompression * 1.4;
@@ -843,7 +1252,6 @@ export function createDrifterCharacter(
       leftLeg.ankle.rotation.x = -leftHipAngle * 0.3 - leftKneeBend * 0.35;
       rightLeg.ankle.rotation.x = -rightHipAngle * 0.3 - rightKneeBend * 0.35;
 
-      // Arms (opposite to legs)
       leftArm.shoulder.rotation.x = -swing * armAmp;
       rightArm.shoulder.rotation.x = swing * armAmp;
       leftArm.shoulder.rotation.z = 0.1 + breathe * 0.6;
@@ -862,7 +1270,12 @@ export function createDrifterCharacter(
           petals[i].position.y = 0.06 + activeT * 0.04;
         }
       } else {
-        odradekBase.rotation.z = THREE.MathUtils.damp(odradekBase.rotation.z, 0.08 + Math.sin(elapsed * 1.6) * 0.04, 6, dt);
+        odradekBase.rotation.z = THREE.MathUtils.damp(
+          odradekBase.rotation.z,
+          0.08 + Math.sin(elapsed * 1.6) * 0.04,
+          6,
+          dt
+        );
         odradekHead.rotation.z = THREE.MathUtils.damp(odradekHead.rotation.z, 0, 6, dt);
         scannerLightMat.emissiveIntensity = 1.1 + Math.sin(elapsed * 2.4) * 0.3;
         for (let i = 0; i < petals.length; i++) {

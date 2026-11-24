@@ -11,6 +11,7 @@ import {
 export type CargoKind = 'resin' | 'bridges';
 
 export const MAX_CARRY_CARGOS = 6;
+export const MAX_CART_CARGOS = 6;
 
 export interface CargoItem {
   id: number;
@@ -22,6 +23,7 @@ export interface CargoItem {
   x: number;
   z: number;
   state: 'world' | 'carried' | 'delivered';
+  storage: 'pack' | 'cart';
 }
 
 export interface MinimapCargoBlip {
@@ -35,9 +37,14 @@ export interface MinimapCargoBlip {
 export interface CargoMissionStatus {
   total: number;
   carried: number;
+  packCarried: number;
+  cartCarried: number;
   maxCarry: number;
+  maxCartCarry: number;
   delivered: number;
   carriedWeightKg: number;
+  cartWeightKg: number;
+  effectiveWeightKg: number;
   nearbyCargoLabel: string | null;
   nearbyCargoWeightKg: number | null;
   backpackFull: boolean;
@@ -46,11 +53,25 @@ export interface CargoMissionStatus {
   worldCargos: MinimapCargoBlip[];
 }
 
+export interface SavedCargoItem {
+  id: number;
+  kind: CargoKind;
+  weightKg: number;
+  x: number;
+  z: number;
+  state: 'world' | 'carried' | 'delivered';
+  storage: 'pack' | 'cart';
+}
+
 export interface CargoSystem {
   group: THREE.Group;
   deliveryPostPos: THREE.Vector3;
+  setCartAvailable: (available: boolean) => void;
+  shiftPackToCart: () => boolean;
   getStatus: (playerPos: THREE.Vector3) => CargoMissionStatus;
   interact: (playerPos: THREE.Vector3) => 'collected' | 'delivered' | 'none';
+  exportState: () => SavedCargoItem[];
+  importState: (saved: SavedCargoItem[]) => void;
   resetMission: (colliders: ObstacleCollider[]) => void;
   update: (elapsed: number, scanRadius: number, scanStrength: number, scanOrigin: THREE.Vector3) => void;
   dispose: () => void;
@@ -235,6 +256,28 @@ function createWoodenDeliveryPost(
   lantern.position.set(1.85, 2.42, -1.82);
   post.add(lantern);
 
+  // Warm interior shelter brazier heater & rear windbreak wall inside Wooden Outpost
+  const windWallGeo = new THREE.BoxGeometry(4.0, 2.2, 0.14);
+  const windWall = new THREE.Mesh(windWallGeo, darkWoodMat);
+  windWall.position.set(0, 1.65, 1.52);
+  windWall.castShadow = true;
+  windWall.receiveShadow = true;
+  post.add(windWall);
+
+  const heaterBodyGeo = new THREE.CylinderGeometry(0.22, 0.26, 0.42, 10);
+  const heaterBody = new THREE.Mesh(heaterBodyGeo, darkWoodMat);
+  heaterBody.position.set(-1.35, 0.74, 0.85);
+  post.add(heaterBody);
+
+  const heaterGlowGeo = new THREE.CylinderGeometry(0.15, 0.15, 0.18, 8);
+  const heaterGlow = new THREE.Mesh(heaterGlowGeo, lanternGlowMat);
+  heaterGlow.position.set(-1.35, 0.96, 0.85);
+  post.add(heaterGlow);
+
+  const postWarmLight = new THREE.PointLight(0xffa042, 2.2, 8.5, 1.6);
+  postWarmLight.position.set(-0.6, 1.6, 0.2);
+  post.add(postWarmLight);
+
   // Subtle drop-off zone ring around the wooden post
   const ringGeo = new THREE.RingGeometry(2.85, 3.05, 36);
   ringGeo.rotateX(-Math.PI / 2);
@@ -255,6 +298,7 @@ function createWoodenDeliveryPost(
 export function createCargoSystem(
   scene: THREE.Scene,
   characterBackpackMount: THREE.Group,
+  cartCargoMount: THREE.Group,
   textures: ProceduralTextureSet,
   colliders: ObstacleCollider[]
 ): CargoSystem {
@@ -337,12 +381,14 @@ export function createCargoSystem(
   group.add(deliveredRack);
 
   const items: CargoItem[] = [];
-  const totalCargos = 8;
+  const totalCargos = 12;
+  let cartAvailable = false;
 
   const isSpotClear = (x: number, z: number): boolean => {
     if (Math.hypot(x - postX, z - postZ) < 12) return false;
     if (Math.hypot(x, z - 18) < 10) return false;
     if (z < shorelineZAt(x) + 1.5) return false;
+    if (groundNormalAt(x, z, _norm).y < 0.8) return false;
     for (const c of colliders) {
       if (Math.hypot(x - c.x, z - c.z) < c.radius + 2.2) return false;
     }
@@ -364,15 +410,15 @@ export function createCargoSystem(
       const mesh = buildCargoMesh(kind, resinMat, bridgesMat, metalMat, rubberMat, ledMat);
       const beacon = new THREE.Mesh(beaconGeo, beaconMat.clone());
 
-      // Pick randomized valid location across beach, lower hollows & hills
+      // Pick randomized valid location across beach, lower hollows & desert mountain plateaus
       let cx = 0;
       let cz = 0;
-      for (let attempt = 0; attempt < 45; attempt++) {
+      for (let attempt = 0; attempt < 55; attempt++) {
         const angle = Math.random() * Math.PI * 2;
-        const dist = 26 + Math.random() * (BEACH_PLAYABLE_RADIUS - 48);
+        const dist = 24 + Math.random() * (BEACH_PLAYABLE_RADIUS - 48);
         const tx = Math.cos(angle) * dist;
-        const tz = Math.sin(angle) * dist * 0.72 + 24;
-        if (Math.hypot(tx, tz) < BEACH_PLAYABLE_RADIUS - 18 && isSpotClear(tx, tz)) {
+        const tz = Math.sin(angle) * dist * 0.76 + 44;
+        if (Math.hypot(tx, tz) < BEACH_PLAYABLE_RADIUS - 20 && isSpotClear(tx, tz)) {
           cx = tx;
           cz = tz;
           break;
@@ -400,6 +446,7 @@ export function createCargoSystem(
         x: cx,
         z: cz,
         state: 'world',
+        storage: 'pack',
       });
     }
   };
@@ -407,15 +454,28 @@ export function createCargoSystem(
   spawnMission();
 
   const layoutCarriedStack = () => {
-    let slot = 0;
+    let packSlot = 0;
+    let cartSlot = 0;
     for (const item of items) {
       if (item.state !== 'carried') continue;
-      characterBackpackMount.add(item.mesh);
-      // Stack vertically above each other inside the rear tubular cargo holder frame (max 6)
-      item.mesh.position.set(0, 0.015 + slot * 0.165, 0);
-      item.mesh.rotation.set(0, Math.PI, 0);
-      item.mesh.scale.set(0.56, 0.72, 0.48);
-      slot++;
+      if (item.storage === 'cart' && cartAvailable) {
+        cartCargoMount.add(item.mesh);
+        // Stack neatly in 2 rows of 3 on the towed cart bed
+        const row = cartSlot < 3 ? -0.26 : 0.26;
+        const tier = cartSlot % 3;
+        item.mesh.position.set(0, 0.01 + tier * 0.175, row);
+        item.mesh.rotation.set(0, 0, 0);
+        item.mesh.scale.set(0.74, 0.74, 0.74);
+        cartSlot++;
+      } else {
+        item.storage = 'pack';
+        characterBackpackMount.add(item.mesh);
+        // Stack vertically above each other inside the rear tubular cargo holder frame (max 6)
+        item.mesh.position.set(0, 0.015 + packSlot * 0.165, 0);
+        item.mesh.rotation.set(0, Math.PI, 0);
+        item.mesh.scale.set(0.56, 0.72, 0.48);
+        packSlot++;
+      }
     }
   };
 
@@ -433,6 +493,29 @@ export function createCargoSystem(
     }
   };
 
+  const setCartAvailable = (available: boolean) => {
+    cartAvailable = available;
+    layoutCarriedStack();
+  };
+
+  const shiftPackToCart = (): boolean => {
+    if (!cartAvailable) return false;
+    let cartCount = 0;
+    for (const item of items) {
+      if (item.state === 'carried' && item.storage === 'cart') cartCount++;
+    }
+    let moved = false;
+    for (const item of items) {
+      if (item.state === 'carried' && item.storage === 'pack' && cartCount < MAX_CART_CARGOS) {
+        item.storage = 'cart';
+        cartCount++;
+        moved = true;
+      }
+    }
+    if (moved) layoutCarriedStack();
+    return moved;
+  };
+
   const findNearestWorldCargo = (playerPos: THREE.Vector3): CargoItem | null => {
     let best: CargoItem | null = null;
     let bestDist = 2.6;
@@ -448,15 +531,22 @@ export function createCargoSystem(
   };
 
   const getStatus = (playerPos: THREE.Vector3): CargoMissionStatus => {
-    let carried = 0;
+    let packCarried = 0;
+    let cartCarried = 0;
     let delivered = 0;
-    let carriedWeightKg = 0;
+    let packWeightKg = 0;
+    let cartWeightKg = 0;
     const worldCargos: MinimapCargoBlip[] = [];
 
     for (const item of items) {
       if (item.state === 'carried') {
-        carried++;
-        carriedWeightKg += item.weightKg;
+        if (item.storage === 'cart' && cartAvailable) {
+          cartCarried++;
+          cartWeightKg += item.weightKg;
+        } else {
+          packCarried++;
+          packWeightKg += item.weightKg;
+        }
       } else if (item.state === 'delivered') {
         delivered++;
       } else {
@@ -470,18 +560,29 @@ export function createCargoSystem(
       }
     }
 
+    const carried = packCarried + cartCarried;
+    const totalWeight = packWeightKg + cartWeightKg;
+    // Cart offloads 75% of carried weight from the player's back & stamina
+    const effectiveWeightKg = packWeightKg + cartWeightKg * 0.25;
+    const totalMax = MAX_CARRY_CARGOS + (cartAvailable ? MAX_CART_CARGOS : 0);
+
     const nearby = findNearestWorldCargo(playerPos);
     const distPost = Math.hypot(playerPos.x - postX, playerPos.z - postZ);
 
     return {
       total: totalCargos,
       carried,
+      packCarried,
+      cartCarried,
       maxCarry: MAX_CARRY_CARGOS,
+      maxCartCarry: cartAvailable ? MAX_CART_CARGOS : 0,
       delivered,
-      carriedWeightKg: Math.round(carriedWeightKg * 10) / 10,
+      carriedWeightKg: Math.round(totalWeight * 10) / 10,
+      cartWeightKg: Math.round(cartWeightKg * 10) / 10,
+      effectiveWeightKg: Math.round(effectiveWeightKg * 10) / 10,
       nearbyCargoLabel: nearby ? nearby.label : null,
       nearbyCargoWeightKg: nearby ? nearby.weightKg : null,
-      backpackFull: carried >= MAX_CARRY_CARGOS,
+      backpackFull: carried >= totalMax,
       nearDeliveryPost: distPost < 4.2,
       deliveryPostPos: { x: postX, z: postZ },
       worldCargos,
@@ -489,14 +590,21 @@ export function createCargoSystem(
   };
 
   const interact = (playerPos: THREE.Vector3): 'collected' | 'delivered' | 'none' => {
-    let carriedCount = 0;
+    let packCount = 0;
+    let cartCount = 0;
     for (const item of items) {
-      if (item.state === 'carried') carriedCount++;
+      if (item.state !== 'carried') continue;
+      if (item.storage === 'cart' && cartAvailable) cartCount++;
+      else packCount++;
     }
 
     const nearby = findNearestWorldCargo(playerPos);
-    if (nearby && carriedCount < MAX_CARRY_CARGOS) {
+    const canFitPack = packCount < MAX_CARRY_CARGOS;
+    const canFitCart = cartAvailable && cartCount < MAX_CART_CARGOS;
+    if (nearby && (canFitPack || canFitCart)) {
       nearby.state = 'carried';
+      // When towed cart is attached, prioritize placing onto the cart if available or overflow
+      nearby.storage = canFitCart ? 'cart' : 'pack';
       nearby.beacon.visible = false;
       layoutCarriedStack();
       return 'collected';
@@ -544,6 +652,60 @@ export function createCargoSystem(
     }
   };
 
+  const exportState = (): SavedCargoItem[] =>
+    items.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      weightKg: item.weightKg,
+      x: item.x,
+      z: item.z,
+      state: item.state,
+      storage: item.storage,
+    }));
+
+  const importState = (saved: SavedCargoItem[]) => {
+    for (const item of items) {
+      item.mesh.parent?.remove(item.mesh);
+      item.beacon.parent?.remove(item.beacon);
+    }
+    items.length = 0;
+
+    for (const s of saved) {
+      const label = s.kind === 'resin' ? 'Resin Container' : 'Bridges Security Case';
+      const mesh = buildCargoMesh(s.kind, resinMat, bridgesMat, metalMat, rubberMat, ledMat);
+      const beacon = new THREE.Mesh(beaconGeo, beaconMat.clone());
+      const cy = groundHeightAt(s.x, s.z);
+      groundNormalAt(s.x, s.z, _norm);
+
+      if (s.state === 'world') {
+        mesh.position.set(s.x, cy + 0.01, s.z);
+        mesh.quaternion.setFromUnitVectors(_up, _norm);
+        mesh.rotateY((s.id * 1.13) % (Math.PI * 2));
+        group.add(mesh);
+        beacon.position.set(s.x, cy + 1.45, s.z);
+        group.add(beacon);
+      } else {
+        beacon.visible = false;
+      }
+
+      items.push({
+        id: s.id,
+        kind: s.kind,
+        label,
+        weightKg: s.weightKg,
+        mesh,
+        beacon,
+        x: s.x,
+        z: s.z,
+        state: s.state,
+        storage: s.storage,
+      });
+    }
+
+    layoutCarriedStack();
+    layoutDeliveredStack();
+  };
+
   const dispose = () => {
     scene.remove(group);
     resinMat.dispose();
@@ -561,8 +723,12 @@ export function createCargoSystem(
   return {
     group,
     deliveryPostPos,
+    setCartAvailable,
+    shiftPackToCart,
     getStatus,
     interact,
+    exportState,
+    importState,
     resetMission: () => spawnMission(),
     update,
     dispose,
