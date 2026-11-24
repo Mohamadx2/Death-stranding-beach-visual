@@ -20,6 +20,7 @@ import {
   loadGameFromSlot,
   saveGameToSlot,
 } from './scene/saveSystem';
+import { TimeOfDayMode } from './scene/timeOfDay';
 import { WeatherMode } from './scene/weather';
 
 export default function App() {
@@ -28,6 +29,7 @@ export default function App() {
 
   const [preset, setPreset] = useState<AtmospherePresetId>('ash');
   const [weatherMode, setWeatherMode] = useState<WeatherMode>('auto');
+  const [timeMode, setTimeMode] = useState<TimeOfDayMode>('auto');
   const [cameraMode, setCameraMode] = useState<CameraMode>('shoulder');
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [contextLost, setContextLost] = useState(false);
@@ -42,6 +44,8 @@ export default function App() {
     headingDeg: 180,
     speed: 0,
     isWading: false,
+    isClimbing: false,
+    climbSlopeDeg: 0,
     health: 100,
     maxHealth: 100,
     playerName: getSavedPlayerName(),
@@ -62,6 +66,13 @@ export default function App() {
       active: 'clear',
       target: 'clear',
       transitioning: false,
+    },
+    timeOfDay: {
+      mode: 'auto',
+      hour: 11.2,
+      formattedTime: '11:12',
+      phaseLabel: 'Daylight',
+      daylight: 1,
     },
     music: {
       triggered: false,
@@ -156,6 +167,11 @@ export default function App() {
     experienceRef.current?.setWeatherMode(next);
   }, []);
 
+  const handleSelectTimeMode = useCallback((next: TimeOfDayMode) => {
+    setTimeMode(next);
+    experienceRef.current?.setTimeMode(next);
+  }, []);
+
   const handleSelectCamera = useCallback((mode: CameraMode) => {
     setCameraMode(mode);
     experienceRef.current?.setCameraMode(mode);
@@ -244,6 +260,7 @@ export default function App() {
     experienceRef.current.setWeatherMode('auto');
     setPreset('ash');
     setWeatherMode('auto');
+    setTimeMode('auto');
     setMenuMode('closed');
     setSaveNotice('Started new expedition');
   }, []);
@@ -262,6 +279,7 @@ export default function App() {
     const loaded = experienceRef.current.loadSaveData(data);
     setPreset(loaded.preset);
     setWeatherMode(loaded.weatherMode);
+    setTimeMode(loaded.timeMode);
     setSaveSlots(listSaveSlots());
     setMenuMode('closed');
     setSaveNotice(`Loaded ${data.slotLabel}`);
@@ -284,6 +302,7 @@ export default function App() {
         telemetry={telemetry}
         preset={preset}
         weatherMode={weatherMode}
+        timeMode={timeMode}
         cameraMode={cameraMode}
         audioEnabled={audioEnabled}
         contextLost={contextLost}
@@ -292,6 +311,7 @@ export default function App() {
         saveNotice={saveNotice}
         onSelectPreset={handleSelectPreset}
         onSelectWeather={handleSelectWeather}
+        onSelectTimeMode={handleSelectTimeMode}
         onSelectCamera={handleSelectCamera}
         onTriggerScan={handleTriggerScan}
         onToggleAudio={handleToggleAudio}

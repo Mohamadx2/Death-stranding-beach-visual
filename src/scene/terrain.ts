@@ -51,7 +51,7 @@ function steppedCliff(value: number, stepHeight: number, sharpness: number): num
 
 /**
  * Analytical terrain heightfield with coastal dunes, grassy hollows,
- * stepped desert-rock foothills, and steep climbable mountain escarpments.
+ * steep climbable highland terraces, and higher desert-rock mountain escarpments.
  */
 export function groundHeightAt(x: number, z: number): number {
   const shoreZ = shorelineZAt(x);
@@ -68,41 +68,60 @@ export function groundHeightAt(x: number, z: number): number {
   } else {
     // Tidal berm transitioning into rolling dunes, lower hollows, and coastal hills
     const berm = Math.tanh(distFromShore * 0.042) * 1.5;
-    const upperRise = Math.max(0, distFromShore - 30) * 0.055;
+    const upperRise = Math.max(0, distFromShore - 28) * 0.068;
 
     // Multi-octave hills, ridges, and sunken gullies inland
-    const inlandMask = THREE.MathUtils.smoothstep(distFromShore, 8, 38);
+    const inlandMask = THREE.MathUtils.smoothstep(distFromShore, 8, 36);
     const hills =
-      Math.sin(x * 0.024 + 0.4) * Math.cos(z * 0.026 - 0.3) * 4.0 +
-      Math.sin(x * 0.055 - z * 0.044) * 1.85 +
-      Math.cos(x * 0.105 + z * 0.092) * 0.68 +
+      Math.sin(x * 0.024 + 0.4) * Math.cos(z * 0.026 - 0.3) * 4.4 +
+      Math.sin(x * 0.055 - z * 0.044) * 2.05 +
+      Math.cos(x * 0.105 + z * 0.092) * 0.72 +
       Math.sin(x * 0.17 - z * 0.15) * 0.25;
 
     // Sheltered lower basins/hollows carved smoothly into the topography
     const basin =
-      -Math.max(0, Math.sin(x * 0.032 - 1.2) * Math.sin(z * 0.035 + 0.7)) * 2.2;
+      -Math.max(0, Math.sin(x * 0.032 - 1.2) * Math.sin(z * 0.035 + 0.7)) * 2.3;
 
     // Elevated scenic overlook ridge around the music trigger point (-34, 62)
     const ridgeDist = Math.hypot(x - MUSIC_TRIGGER_POINT.x, z - MUSIC_TRIGGER_POINT.z);
-    const overlookMound = Math.exp(-(ridgeDist * ridgeDist) / 480) * 2.8;
+    const overlookMound = Math.exp(-(ridgeDist * ridgeDist) / 480) * 3.1;
 
-    // Stepped desert-rock foothills & steep climbable mountain escarpments (inland z > 80m)
-    const mountainMask = THREE.MathUtils.smoothstep(distFromShore, 75, 130);
+    // Keep immediate spawn (0, 18) and Wooden Outpost (14, 36) approach walkable
+    const postDist = Math.hypot(x - 14, z - 36);
+    const refugeDist = Math.hypot(x + 20, z - 128);
+    const padFlatten =
+      (1.0 - Math.exp(-(postDist * postDist) / 190)) *
+      (1.0 - Math.exp(-(refugeDist * refugeDist) / 95));
+
+    // Mid-coast steep basalt cliff terraces (climbable with hands or ladders)
+    const coastalCliffMask = THREE.MathUtils.smoothstep(distFromShore, 42, 68) * padFlatten;
+    const coastalStepBase =
+      Math.max(0, distFromShore - 42) * 0.15 +
+      Math.sin(x * 0.036 + 0.8) * 2.6;
+    const coastalEscarpment = steppedCliff(Math.max(0, coastalStepBase), 3.4, 15.0) * 0.58;
+
+    // Stepped desert-rock foothills & higher steep climbable mountain escarpments (inland z > 72m)
+    const mountainMask = THREE.MathUtils.smoothstep(distFromShore, 72, 126) * (0.35 + 0.65 * padFlatten);
     const baseSlope =
-      Math.max(0, distFromShore - 75) * 0.155 +
-      Math.sin(x * 0.022 - 0.7) * 4.2 +
-      Math.cos(x * 0.045 + z * 0.015) * 2.2;
-    const terracedEscarpment = steppedCliff(Math.max(0, baseSlope), 3.6, 11.5);
+      Math.max(0, distFromShore - 72) * 0.205 +
+      Math.sin(x * 0.022 - 0.7) * 4.8 +
+      Math.cos(x * 0.045 + z * 0.015) * 2.5;
+    const terracedEscarpment = steppedCliff(Math.max(0, baseSlope), 4.4, 16.5);
+    const highPeakSurge =
+      THREE.MathUtils.smoothstep(distFromShore, 130, 235) *
+      (8.5 + Math.sin(x * 0.032 + 1.1) * 3.6 + Math.cos(z * 0.028) * 2.4);
     const canyonCarve =
-      Math.sin(x * 0.034 + Math.sin(z * 0.02) * 1.2) * 1.9 +
-      Math.cos(x * 0.072 - z * 0.048) * 0.75;
+      Math.sin(x * 0.034 + Math.sin(z * 0.02) * 1.2) * 2.2 +
+      Math.cos(x * 0.072 - z * 0.048) * 0.85;
 
     h =
       berm +
       upperRise +
       (hills + basin) * inlandMask +
       overlookMound +
-      mountainMask * (terracedEscarpment + canyonCarve);
+      coastalCliffMask * coastalEscarpment +
+      mountainMask * (terracedEscarpment + canyonCarve) +
+      highPeakSurge;
   }
 
   // Dramatic craggy mountain amphitheater near outer 300m playable perimeter
@@ -110,10 +129,10 @@ export function groundHeightAt(x: number, z: number): number {
   if (radial > 248) {
     const rimT = THREE.MathUtils.smoothstep(radial, 248, 390);
     const crag =
-      Math.sin(x * 0.06) * Math.cos(z * 0.06) * 3.8 +
-      Math.sin(x * 0.15 + z * 0.13) * 1.25;
+      Math.sin(x * 0.06) * Math.cos(z * 0.06) * 4.4 +
+      Math.sin(x * 0.15 + z * 0.13) * 1.45;
     const landMask = THREE.MathUtils.smoothstep(z - shoreZ, -18, 30);
-    h += rimT * landMask * (26.0 + crag);
+    h += rimT * landMask * (30.0 + crag);
   }
 
   // Subtle wet-sand tide channels near shore

@@ -35,6 +35,12 @@ import {
   createWeatherSystem,
 } from './weather';
 import {
+  TimeOfDayMode,
+  TimeOfDaySnapshot,
+  TimeOfDaySystem,
+  createTimeOfDaySystem,
+} from './timeOfDay';
+import {
   GameSaveData,
   getSavedPlayerName,
   setSavedPlayerName,
@@ -48,6 +54,14 @@ export interface WeatherTelemetry {
   active: WeatherKind;
   target: WeatherKind;
   transitioning: boolean;
+}
+
+export interface TimeOfDayTelemetry {
+  mode: TimeOfDayMode;
+  hour: number;
+  formattedTime: string;
+  phaseLabel: string;
+  daylight: number;
 }
 
 export interface MusicTriggerTelemetry {
@@ -67,6 +81,8 @@ export interface SceneTelemetry {
   headingDeg: number;
   speed: number;
   isWading: boolean;
+  isClimbing: boolean;
+  climbSlopeDeg: number;
   health: number;
   maxHealth: number;
   playerName: string;
@@ -83,6 +99,7 @@ export interface SceneTelemetry {
   playableRadius: number;
   boundaryHit: boolean;
   weather: WeatherTelemetry;
+  timeOfDay: TimeOfDayTelemetry;
   music: MusicTriggerTelemetry;
   cargo: CargoMissionStatus;
   nearbyCrystalYield: number | null;
@@ -97,6 +114,22 @@ export interface BeachExperienceOptions {
 
 const _camTarget = new THREE.Vector3();
 const _camDesired = new THREE.Vector3();
+const _tmpFogColor = new THREE.Color();
+const _rainFogColor = new THREE.Color(0x7c8691);
+const _snowFogColor = new THREE.Color(0xd7dfe7);
+const _duskFogColor = new THREE.Color(0x7a5b53);
+const _nightFogColor = new THREE.Color(0x1b232e);
+const _nightSnowFogColor = new THREE.Color(0x283344);
+const _tmpKeyColor = new THREE.Color();
+const _duskKeyColor = new THREE.Color(0xffa76c);
+const _nightKeyColor = new THREE.Color(0x9db7de);
+const _tmpHemiSky = new THREE.Color();
+const _duskHemiSky = new THREE.Color(0x937481);
+const _nightHemiSky = new THREE.Color(0x3b4d68);
+const _tmpHemiGround = new THREE.Color();
+const _nightHemiGround = new THREE.Color(0x0d1219);
+const _dayRimColor = new THREE.Color(0x88a4be);
+const _nightRimColor = new THREE.Color(0x4f6d94);
 
 export class BeachExperience {
   private renderer: THREE.WebGLRenderer;
@@ -104,6 +137,7 @@ export class BeachExperience {
   private camera: THREE.PerspectiveCamera;
   private environment: BeachEnvironment;
   private weather: WeatherSystem;
+  private timeOfDay: TimeOfDaySystem;
   private character: CharacterController;
   private equipment: EquipmentSystem;
   private crystals: CrystalSystem;
@@ -122,6 +156,7 @@ export class BeachExperience {
   private fog: THREE.FogExp2;
   private currentPresetId: AtmospherePresetId = 'ash';
   private lastWeatherSnapshot: WeatherSnapshot;
+  private lastTimeSnapshot: TimeOfDaySnapshot;
 
   private isSoftwareGl: boolean;
   private frameId = 0;
@@ -242,6 +277,10 @@ export class BeachExperience {
     this.scene.add(this.weather.group);
     this.lastWeatherSnapshot = this.weather.getSnapshot();
 
+    this.timeOfDay = createTimeOfDaySystem(11.2);
+    this.lastTimeSnapshot = this.timeOfDay.getSnapshot();
+    this.environment.applyTimeOfDay(this.lastTimeSnapshot);
+
     this.character = createDrifterCharacter(this.scene, this.textures);
     this.character.setPlayerName(getSavedPlayerName());
     this.equipment = createEquipmentSystem(this.scene, this.isSoftwareGl);
@@ -310,6 +349,17 @@ export class BeachExperience {
   public setWeatherMode(mode: WeatherMode): void {
     this.weather.setMode(mode);
     this.lastWeatherSnapshot = this.weather.getSnapshot();
+    this.pushTelemetryNow();
+  }
+
+  public setTimeMode(mode: TimeOfDayMode): void {
+    this.timeOfDay.setMode(mode);
+    // Snap immediately when explicitly selected in UI for crisp visual feedback
+    if (mode !== 'auto') {
+      this.timeOfDay.update(5);
+    }
+    this.lastTimeSnapshot = this.timeOfDay.getSnapshot();
+    this.environment.applyTimeOfDay(this.lastTimeSnapshot);
     this.pushTelemetryNow();
   }
 
@@ -494,6 +544,8 @@ export class BeachExperience {
       wormsInPouch: this.wormsInPouch,
       preset: this.currentPresetId,
       weatherMode: this.lastWeatherSnapshot.mode,
+      timeMode: this.lastTimeSnapshot.mode,
+      timeHour: this.lastTimeSnapshot.hour,
       musicTriggered: this.musicTriggered,
       cargo: this.cargo.exportState(),
       crystals: this.crystals.exportState(),
@@ -505,10 +557,18 @@ export class BeachExperience {
   public loadSaveData(data: GameSaveData): {
     preset: AtmospherePresetId;
     weatherMode: WeatherMode;
+    timeMode: TimeOfDayMode;
     playerName: string;
   } {
     this.setAtmosphere(data.preset);
     this.setWeatherMode(data.weatherMode);
+    const restoredTimeMode = data.timeMode ?? 'auto';
+    this.timeOfDay.setMode(restoredTimeMode);
+    if (typeof data.timeHour === 'number') {
+      this.timeOfDay.setHour(data.timeHour);
+    }
+    this.lastTimeSnapshot = this.timeOfDay.getSnapshot();
+    this.environment.applyTimeOfDay(this.lastTimeSnapshot);
     this.equipment.importState(data.equipment);
     const eqSnap = this.equipment.getSnapshot();
     this.cargo.setCartAvailable(eqSnap.hasCart && eqSnap.cartAttached);
@@ -539,6 +599,7 @@ export class BeachExperience {
     return {
       preset: data.preset,
       weatherMode: data.weatherMode,
+      timeMode: restoredTimeMode,
       playerName: cleanName,
     };
   }
@@ -552,6 +613,10 @@ export class BeachExperience {
     this.wormsInPouch = 0;
     this.musicTriggered = false;
     this.musicBannerTimer = 0;
+    this.timeOfDay.setMode('auto');
+    this.timeOfDay.setHour(11.2);
+    this.lastTimeSnapshot = this.timeOfDay.getSnapshot();
+    this.environment.applyTimeOfDay(this.lastTimeSnapshot);
     this.character.resetState();
     this.syncCameraImmediate();
     this.pushTelemetryNow();
@@ -581,6 +646,8 @@ export class BeachExperience {
       headingDeg: deg,
       speed: this.character.speed,
       isWading: this.character.isWading,
+      isClimbing: this.character.isClimbing,
+      climbSlopeDeg: this.character.climbSlopeDeg,
       health: this.character.health,
       maxHealth: this.character.maxHealth,
       playerName: this.character.playerName,
@@ -601,6 +668,13 @@ export class BeachExperience {
         active: this.lastWeatherSnapshot.active,
         target: this.lastWeatherSnapshot.target,
         transitioning: this.lastWeatherSnapshot.transitioning,
+      },
+      timeOfDay: {
+        mode: this.lastTimeSnapshot.mode,
+        hour: this.lastTimeSnapshot.hour,
+        formattedTime: this.lastTimeSnapshot.formattedTime,
+        phaseLabel: this.lastTimeSnapshot.phaseLabel,
+        daylight: this.lastTimeSnapshot.daylight,
       },
       music: {
         triggered: this.musicTriggered,
@@ -791,6 +865,7 @@ export class BeachExperience {
             anchorAssist,
             rainWeight: this.lastWeatherSnapshot.rainWeight,
             snowWeight: this.lastWeatherSnapshot.snowWeight,
+            nightWeight: this.lastTimeSnapshot.nightWeight,
             insideBuilding: shelter.inside,
             buildingName: shelter.buildingName,
             surfaceHeightResolver: (x, z, terrainY) =>
@@ -805,8 +880,14 @@ export class BeachExperience {
         this.cameraYaw += delta * 0.08;
       }
 
-      // Update environment, volumetric weather, cargo beacons & particles
+      // Update environment, time of day, volumetric weather, cargo beacons & particles
       this.environment.update(elapsed, delta, this.character.position);
+      const timeSnap = this.paused
+        ? this.timeOfDay.getSnapshot()
+        : this.timeOfDay.update(delta);
+      this.lastTimeSnapshot = timeSnap;
+      this.environment.applyTimeOfDay(timeSnap);
+
       const weatherSnap = this.weather.update(
         delta,
         elapsed,
@@ -816,29 +897,60 @@ export class BeachExperience {
       this.lastWeatherSnapshot = weatherSnap;
       this.environment.applyWeather(weatherSnap);
 
-      // Blend atmospheric fog & lighting smoothly with active weather
+      // Blend atmospheric fog & lighting smoothly with weather + daylight/night cycle
       const basePreset = ATMOSPHERE_PRESETS[this.currentPresetId];
-      const baseFog = new THREE.Color(basePreset.fogColor);
-      const rainFog = new THREE.Color(0x7c8691);
-      const snowFog = new THREE.Color(0xd7dfe7);
-      baseFog
-        .lerp(rainFog, weatherSnap.rainWeight * 0.72)
-        .lerp(snowFog, weatherSnap.snowWeight * 0.65);
-      this.fog.color.copy(baseFog);
+      _tmpFogColor.setHex(basePreset.fogColor);
+      _tmpFogColor
+        .lerp(_rainFogColor, weatherSnap.rainWeight * 0.72)
+        .lerp(_snowFogColor, weatherSnap.snowWeight * 0.65)
+        .lerp(_duskFogColor, timeSnap.twilight * 0.34)
+        .lerp(_nightFogColor, timeSnap.nightWeight * 0.84)
+        .lerp(_nightSnowFogColor, timeSnap.nightWeight * weatherSnap.snowWeight * 0.48);
+      this.fog.color.copy(_tmpFogColor);
       if (this.scene.background instanceof THREE.Color) {
-        this.scene.background.copy(baseFog);
+        this.scene.background.copy(_tmpFogColor);
       }
-      this.fog.density = basePreset.fogDensity * weatherSnap.fogMultiplier;
+      this.fog.density =
+        basePreset.fogDensity *
+        weatherSnap.fogMultiplier *
+        (1 + timeSnap.nightWeight * 0.12);
+
+      const weatherKeyFactor =
+        weatherSnap.clearWeight * 1.06 +
+        weatherSnap.rainWeight * 0.68 +
+        weatherSnap.snowWeight * 0.92;
+      _tmpKeyColor
+        .setHex(basePreset.keyColor)
+        .lerp(_duskKeyColor, timeSnap.twilight * 0.62)
+        .lerp(_nightKeyColor, timeSnap.nightWeight * 0.88);
+      this.keyLight.color.copy(_tmpKeyColor);
       this.keyLight.intensity =
         basePreset.keyIntensity *
-        (weatherSnap.clearWeight * 1.06 +
-          weatherSnap.rainWeight * 0.68 +
-          weatherSnap.snowWeight * 0.92);
+        weatherKeyFactor *
+        (1 - timeSnap.nightWeight * 0.56);
+
+      const weatherHemiFactor =
+        weatherSnap.clearWeight * 1.0 +
+        weatherSnap.rainWeight * 0.85 +
+        weatherSnap.snowWeight * 1.12;
+      _tmpHemiSky
+        .setHex(basePreset.hemiSky)
+        .lerp(_duskHemiSky, timeSnap.twilight * 0.45)
+        .lerp(_nightHemiSky, timeSnap.nightWeight * 0.82);
+      _tmpHemiGround
+        .setHex(basePreset.hemiGround)
+        .lerp(_nightHemiGround, timeSnap.nightWeight * 0.72);
+      this.hemiLight.color.copy(_tmpHemiSky);
+      this.hemiLight.groundColor.copy(_tmpHemiGround);
       this.hemiLight.intensity =
         basePreset.hemiIntensity *
-        (weatherSnap.clearWeight * 1.0 +
-          weatherSnap.rainWeight * 0.85 +
-          weatherSnap.snowWeight * 1.12);
+        weatherHemiFactor *
+        (1 - timeSnap.nightWeight * 0.54);
+
+      this.rimLight.color.copy(_dayRimColor).lerp(_nightRimColor, timeSnap.nightWeight);
+      this.rimLight.intensity = 0.75 * (1 - timeSnap.nightWeight * 0.36);
+      this.renderer.toneMappingExposure =
+        basePreset.exposure * (1 - timeSnap.nightWeight * 0.24);
 
       this.cargo.update(
         elapsed,
@@ -888,9 +1000,14 @@ export class BeachExperience {
         }
       }
 
-      // Keep directional shadow frustum centered around the player
+      // Keep directional sun/moon shadow frustum centered around the player
       const p = this.character.position;
-      this.keyLight.position.set(p.x + 22, p.y + 32, p.z - 26);
+      const celestial = timeSnap.celestialDir;
+      this.keyLight.position.set(
+        p.x + celestial.x * 44,
+        p.y + celestial.y * 44,
+        p.z + celestial.z * 44
+      );
       this.keyLight.target.position.copy(p);
       this.keyLight.target.updateMatrixWorld();
 

@@ -2,6 +2,7 @@ import { SavedCargoItem } from './cargo';
 import { SavedCrystalNode } from './crystals';
 import { SavedEquipmentState } from './equipment';
 import { AtmospherePresetId } from './materials';
+import { TimeOfDayMode } from './timeOfDay';
 import { WeatherMode } from './weather';
 
 export interface GameSaveData {
@@ -18,6 +19,8 @@ export interface GameSaveData {
   wormsInPouch: number;
   preset: AtmospherePresetId;
   weatherMode: WeatherMode;
+  timeMode?: TimeOfDayMode;
+  timeHour?: number;
   musicTriggered: boolean;
   cargo: SavedCargoItem[];
   crystals: SavedCrystalNode[];

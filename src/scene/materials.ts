@@ -504,29 +504,34 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       const i = y * cobSize + x;
       cobHeight[i] = stoneMask * (0.45 + dome * 0.55) + (n - 0.5) * 0.08;
 
-      // In crevices (stoneMask < 0.35), grow vibrant mossy green & sandy grit
+      // Smoothly blend vibrant moss/leaf sprigs & russet leaf litter in stone crevices
       const creviceGreen = 1.0 - stoneMask;
-      const leafNoise = Math.sin(x * 0.14 + y * 0.09) * Math.cos(x * 0.08 - y * 0.15);
-      const isGreenShoot = creviceGreen > 0.42 && leafNoise > 0.05;
-      const isRussetLeaf = creviceGreen > 0.48 && leafNoise < -0.48;
+      const leafWave =
+        Math.sin(x * 0.12 + y * 0.08 + Math.cos(x * 0.05) * 1.4) *
+        Math.cos(x * 0.07 - y * 0.13);
+      const greenShootT =
+        THREE.MathUtils.smoothstep(creviceGreen, 0.28, 0.72) *
+        THREE.MathUtils.smoothstep(-0.05, 0.42, leafWave);
+      const russetLeafT =
+        THREE.MathUtils.smoothstep(creviceGreen, 0.35, 0.80) *
+        THREE.MathUtils.smoothstep(-0.28, -0.68, leafWave);
 
-      let r = bestSite.r * (0.76 + dome * 0.36) + speckle;
-      let g = bestSite.g * (0.76 + dome * 0.36) + speckle;
-      let b = bestSite.b * (0.76 + dome * 0.36) + speckle;
+      let r = bestSite.r * (0.76 + dome * 0.34) + speckle * 0.7;
+      let g = bestSite.g * (0.76 + dome * 0.34) + speckle * 0.7;
+      let b = bestSite.b * (0.76 + dome * 0.34) + speckle * 0.7;
 
-      if (isGreenShoot) {
-        r = 78 + n * 38;
-        g = 128 + n * 48;
-        b = 34 + n * 18;
-      } else if (isRussetLeaf) {
-        r = 122 + n * 28;
-        g = 62 + n * 18;
-        b = 42 + n * 12;
-      } else if (creviceGreen > 0.25) {
-        r = THREE.MathUtils.lerp(r, 64 + speckle, creviceGreen * 0.85);
-        g = THREE.MathUtils.lerp(g, 82 + speckle, creviceGreen * 0.85);
-        b = THREE.MathUtils.lerp(b, 44 + speckle, creviceGreen * 0.85);
-      }
+      const mortarT = THREE.MathUtils.smoothstep(creviceGreen, 0.15, 0.75);
+      r = THREE.MathUtils.lerp(r, 54 + speckle * 0.5, mortarT * 0.8);
+      g = THREE.MathUtils.lerp(g, 68 + speckle * 0.5, mortarT * 0.8);
+      b = THREE.MathUtils.lerp(b, 36 + speckle * 0.5, mortarT * 0.8);
+
+      r = THREE.MathUtils.lerp(r, 74 + n * 24, greenShootT * 0.88);
+      g = THREE.MathUtils.lerp(g, 114 + n * 32, greenShootT * 0.88);
+      b = THREE.MathUtils.lerp(b, 34 + n * 14, greenShootT * 0.88);
+
+      r = THREE.MathUtils.lerp(r, 112 + n * 20, russetLeafT * 0.75);
+      g = THREE.MathUtils.lerp(g, 60 + n * 14, russetLeafT * 0.75);
+      b = THREE.MathUtils.lerp(b, 40 + n * 10, russetLeafT * 0.75);
 
       const idx = i * 4;
       cData[idx] = THREE.MathUtils.clamp(r, 18, 210);

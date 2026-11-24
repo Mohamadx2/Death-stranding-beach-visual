@@ -26,6 +26,7 @@ export interface CharacterInputState {
   anchorAssist?: boolean;
   rainWeight?: number;
   snowWeight?: number;
+  nightWeight?: number;
   insideBuilding?: boolean;
   buildingName?: string | null;
   surfaceHeightResolver?: (x: number, z: number, terrainY: number) => number;
@@ -40,6 +41,8 @@ export interface CharacterController {
   isGrounded: boolean;
   isSprinting: boolean;
   isWading: boolean;
+  isClimbing: boolean;
+  climbSlopeDeg: number;
   health: number;
   maxHealth: number;
   playerName: string;
@@ -839,13 +842,20 @@ export function createDrifterCharacter(
     entry.mat.opacity = h < 0.6 ? 0.72 : 0.52;
   };
 
-  // Physics, Health, Weight, Stamina, Cold & Cooldown State
+  // Physics, Health, Weight, Stamina, Cold & Climbing State
   const velocity = new THREE.Vector3();
   let verticalVel = 0;
   let isGrounded = true;
   let yaw = Math.PI;
   let stridePhase = 0;
   let lastStepHalf = 0;
+  let isClimbing = false;
+  let climbSlopeDeg = 0;
+  let climbBlend = 0;
+  let climbPhase = 0;
+  let lastClimbStepHalf = 0;
+  let climbWallDirX = 0;
+  let climbWallDirZ = 1;
   let scanTimer = 0;
   let landCompression = 0;
   const maxHealth = 100;
@@ -903,6 +913,9 @@ export function createDrifterCharacter(
     velocity.set(0, 0, 0);
     verticalVel = 0;
     isGrounded = true;
+    isClimbing = false;
+    climbSlopeDeg = 0;
+    climbBlend = 0;
     yaw = state.yaw;
     root.rotation.y = yaw;
     health = THREE.MathUtils.clamp(state.health, 0, maxHealth);
@@ -912,6 +925,8 @@ export function createDrifterCharacter(
     cold = THREE.MathUtils.clamp(state.cold, 0, 100);
     drawNameBadge(state.playerName);
     controller.yaw = yaw;
+    controller.isClimbing = false;
+    controller.climbSlopeDeg = 0;
     controller.health = health;
     controller.stamina = stamina;
     controller.staminaExhausted = staminaExhausted;
@@ -957,6 +972,8 @@ export function createDrifterCharacter(
     isGrounded: true,
     isSprinting: false,
     isWading: false,
+    isClimbing: false,
+    climbSlopeDeg: 0,
     health,
     maxHealth,
     playerName,
@@ -1013,7 +1030,7 @@ export function createDrifterCharacter(
       const actuallySprinting = wantsSprint && horizSpeed > walkSpeed + 0.5;
       controller.isSprinting = actuallySprinting;
 
-      // Apply horizontal velocity, steep cliff blocking, and obstacle/wall collisions
+      // Apply horizontal velocity, hand-climbing on steep/high slopes, and obstacle/wall collisions
       const prevX = root.position.x;
       const prevZ = root.position.z;
       const prevTerrainY = groundHeightAt(prevX, prevZ);
@@ -1026,29 +1043,86 @@ export function createDrifterCharacter(
         : nextTerrainY;
       const onBridgeLadder = nextSurfaceY > nextTerrainY + 0.03;
 
+      let activeClimbMove = false;
+      let clingingOnSlope = false;
+      const wasClimbing = isClimbing;
+      isClimbing = false;
+      climbSlopeDeg = 0;
+
       if (!onBridgeLadder) {
         groundNormalAt(nextX, nextZ, _surfNorm);
-        if (_surfNorm.y < 0.74 && nextTerrainY > prevTerrainY + 0.015) {
+        const slopeDeg = Math.round(
+          THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(_surfNorm.y, 0, 1)))
+        );
+        // Very steep faces (> ~42 deg) or steep high-altitude ridges (> ~37 deg above 9m) engage hand-climbing
+        const isSteepFace =
+          _surfNorm.y < 0.74 || (_surfNorm.y < 0.80 && Math.max(prevTerrainY, nextTerrainY) > 9.0);
+
+        if (isSteepFace) {
           const nx = _surfNorm.x;
           const nz = _surfNorm.z;
           const hLen = Math.hypot(nx, nz);
           if (hLen > 1e-4) {
             const downX = nx / hLen;
             const downZ = nz / hLen;
-            const intoSlope = velocity.x * downX + velocity.z * downZ;
-            if (intoSlope < 0) {
-              velocity.x -= downX * intoSlope;
-              velocity.z -= downZ * intoSlope;
-            }
-            nextX = prevX + velocity.x * dt;
-            nextZ = prevZ + velocity.z * dt;
-            if (_surfNorm.y < 0.64) {
-              nextX += downX * 0.85 * dt;
-              nextZ += downZ * 0.85 * dt;
+            const inputIntoSlope = hasInput ? _moveDir.x * downX + _moveDir.z * downZ : 0;
+            const velIntoSlope = velocity.x * downX + velocity.z * downZ;
+            const pushingUphill = inputIntoSlope < -0.05 || nextTerrainY > prevTerrainY + 0.01;
+            const canGrip = !staminaExhausted && stamina > 1.2;
+
+            if (canGrip && (pushingUphill || (wasClimbing && !hasInput))) {
+              isClimbing = true;
+              climbSlopeDeg = slopeDeg;
+              climbWallDirX = -downX;
+              climbWallDirZ = -downZ;
+
+              if (hasInput && inputIntoSlope < 0.25) {
+                activeClimbMove = true;
+                // Keep 3D arc-length climbing speed natural (~1.7 - 2.3 m/s) even on near-vertical rock walls
+                const arcScale = THREE.MathUtils.clamp(_surfNorm.y, 0.24, 0.92);
+                const climbEffortSpeed =
+                  2.45 * (1 - loadRatio * 0.24) * coldPenalty * (wantsSprint ? 1.18 : 1.0);
+                velocity.x = THREE.MathUtils.damp(
+                  velocity.x,
+                  _moveDir.x * climbEffortSpeed * arcScale,
+                  10,
+                  dt
+                );
+                velocity.z = THREE.MathUtils.damp(
+                  velocity.z,
+                  _moveDir.z * climbEffortSpeed * arcScale,
+                  10,
+                  dt
+                );
+                nextX = prevX + velocity.x * dt;
+                nextZ = prevZ + velocity.z * dt;
+              } else {
+                // Resting/clinging securely to the cliff face when no movement key is held
+                clingingOnSlope = true;
+                velocity.x *= Math.exp(-14 * dt);
+                velocity.z *= Math.exp(-14 * dt);
+                nextX = prevX + velocity.x * dt;
+                nextZ = prevZ + velocity.z * dt;
+              }
+            } else if (velIntoSlope < 0 || !canGrip) {
+              // Exhausted or sliding down without grip
+              if (velIntoSlope < 0) {
+                velocity.x -= downX * velIntoSlope;
+                velocity.z -= downZ * velIntoSlope;
+              }
+              nextX = prevX + velocity.x * dt;
+              nextZ = prevZ + velocity.z * dt;
+              if (!canGrip || _surfNorm.y < 0.64) {
+                nextX += downX * (canGrip ? 0.65 : 2.15) * dt;
+                nextZ += downZ * (canGrip ? 0.65 : 2.15) * dt;
+              }
             }
           }
         }
       }
+
+      controller.isClimbing = isClimbing;
+      controller.climbSlopeDeg = climbSlopeDeg;
 
       root.position.x = nextX;
       root.position.z = nextZ;
@@ -1079,15 +1153,23 @@ export function createDrifterCharacter(
       const anchorRegenMult = input.anchorAssist ? 1.45 : 1.0;
 
       const jumpCost = (12 + carriedWeightKg * 0.14) * anchorDrainMult;
-      if (input.jumpPressed && isGrounded && !staminaExhausted && stamina >= 8) {
-        verticalVel = 5.4 - loadRatio * 0.45;
+      if (input.jumpPressed && (isGrounded || isClimbing) && !staminaExhausted && stamina >= 8) {
+        verticalVel = (isClimbing ? 4.9 : 5.4) - loadRatio * 0.45;
         isGrounded = false;
+        isClimbing = false;
+        controller.isClimbing = false;
         stamina = Math.max(0, stamina - jumpCost);
       }
 
-      // Stamina & Exhaustion Cooldown
+      // Stamina & Exhaustion Cooldown (accounts for hand-climbing exertion)
       const coldRegenMult = cold >= 70 ? 0.72 : 1.0;
-      if (actuallySprinting) {
+      if (activeClimbMove) {
+        const climbDrain = (9.8 + carriedWeightKg * 0.18) * anchorDrainMult;
+        stamina = Math.max(0, stamina - climbDrain * dt);
+      } else if (clingingOnSlope) {
+        const holdDrain = (1.35 + carriedWeightKg * 0.04) * anchorDrainMult;
+        stamina = Math.max(0, stamina - holdDrain * dt);
+      } else if (actuallySprinting && !isClimbing) {
         const drainRate = (13.5 + carriedWeightKg * 0.26) * anchorDrainMult;
         stamina = Math.max(0, stamina - drainRate * dt);
       } else if (isGrounded) {
@@ -1123,7 +1205,7 @@ export function createDrifterCharacter(
       controller.insideBuilding = insideBuilding;
       controller.buildingName = input.buildingName ?? null;
 
-      // Cold Feeling / Thermal Exposure Update (drops rapidly inside sheltered buildings)
+      // Cold Feeling / Thermal Exposure Update (drops rapidly inside sheltered buildings, rises mildly at night)
       if (insideBuilding) {
         cold = Math.max(0, cold - 18.0 * dt);
         if (cold < 45 && health < maxHealth) {
@@ -1132,10 +1214,12 @@ export function createDrifterCharacter(
       } else {
         const snowChill = (input.snowWeight ?? 0) * 2.45;
         const rainChill = (input.rainWeight ?? 0) * 1.15;
+        const nightChill = (input.nightWeight ?? 0) * 0.34;
         const surfChill = wading ? 3.4 : 0;
         const altitudeChill = root.position.y > 5 ? Math.min(1.65, (root.position.y - 5) * 0.11) : 0;
-        const exertionWarmth = actuallySprinting && !wading ? -0.55 : 0;
-        const coldRate = 0.22 + snowChill + rainChill + surfChill + altitudeChill + exertionWarmth;
+        const exertionWarmth = (actuallySprinting || activeClimbMove) && !wading ? -0.58 : 0;
+        const coldRate =
+          0.22 + snowChill + rainChill + nightChill + surfChill + altitudeChill + exertionWarmth;
         cold = THREE.MathUtils.clamp(cold + coldRate * dt, 0, 100);
         if (cold >= 98) {
           health = Math.max(5, health - 0.8 * dt);
@@ -1167,13 +1251,22 @@ export function createDrifterCharacter(
           });
         }
       } else {
-        root.position.y = THREE.MathUtils.damp(root.position.y, groundY, 20, dt);
+        root.position.y = THREE.MathUtils.damp(
+          root.position.y,
+          groundY,
+          isClimbing ? 28 : 20,
+          dt
+        );
       }
 
       controller.isGrounded = isGrounded;
 
-      // Smooth character yaw toward movement direction
-      if (horizSpeed > 0.2) {
+      // Smooth character yaw: face into the rock wall while climbing, otherwise face movement direction
+      if (isClimbing) {
+        const wallYaw = Math.atan2(climbWallDirX, climbWallDirZ);
+        const diff = shortestAngleDiff(yaw, wallYaw);
+        yaw += diff * (1 - Math.exp(-12 * dt));
+      } else if (horizSpeed > 0.2) {
         const targetYaw = Math.atan2(velocity.x, velocity.z);
         const diff = shortestAngleDiff(yaw, targetYaw);
         yaw += diff * (1 - Math.exp(-11 * dt));
@@ -1181,11 +1274,30 @@ export function createDrifterCharacter(
       controller.yaw = yaw;
       root.rotation.y = yaw;
 
-      // Procedural Gait & Articulated Joint Kinematics
+      // Procedural Gait, Hand-Climbing & Articulated Joint Kinematics
       const moveWeight = THREE.MathUtils.clamp(horizSpeed / 3.2, 0, 1);
       const sprintBlend = THREE.MathUtils.clamp((horizSpeed - 3.2) / 3.4, 0, 1);
+      climbBlend = THREE.MathUtils.damp(climbBlend, isClimbing ? 1 : 0, 11, dt);
 
-      if (horizSpeed > 0.15 && isGrounded) {
+      if (isClimbing) {
+        const climbTravelSpeed = Math.hypot(
+          (root.position.x - prevX) / Math.max(dt, 1e-4),
+          (root.position.z - prevZ) / Math.max(dt, 1e-4),
+          Math.max(0, groundY - prevTerrainY) / Math.max(dt, 1e-4)
+        );
+        if (activeClimbMove && climbTravelSpeed > 0.2) {
+          climbPhase += dt * (4.6 + climbTravelSpeed * 1.45);
+          const climbHalf = Math.floor(climbPhase / Math.PI);
+          if (climbHalf !== lastClimbStepHalf) {
+            lastClimbStepHalf = climbHalf;
+            onFootstep?.({
+              surface: 'rock',
+              heavyCargo: carriedWeightKg >= 12,
+              weightKg: carriedWeightKg,
+            });
+          }
+        }
+      } else if (horizSpeed > 0.15 && isGrounded) {
         const freq = THREE.MathUtils.lerp(5.8, 9.6, sprintBlend);
         stridePhase += dt * freq;
 
@@ -1215,7 +1327,7 @@ export function createDrifterCharacter(
       const legAmp = THREE.MathUtils.lerp(0.55, 0.88, sprintBlend) * moveWeight;
       const armAmp = THREE.MathUtils.lerp(0.45, 0.78, sprintBlend) * moveWeight;
 
-      const breatheSpeed = staminaExhausted ? 4.4 : 2.1;
+      const breatheSpeed = staminaExhausted ? 4.4 : isClimbing ? 3.2 : 2.1;
       const breatheAmp = staminaExhausted ? 0.032 : 0.015;
       const breathe = Math.sin(elapsed * breatheSpeed) * breatheAmp;
       const shiver = cold >= 70 && !insideBuilding ? Math.sin(elapsed * 26) * 0.008 * (1 - moveWeight) : 0;
@@ -1223,20 +1335,38 @@ export function createDrifterCharacter(
 
       const strideBob = Math.abs(swingCos) * 0.045 * moveWeight;
       const jumpTuck = !isGrounded ? 0.06 : 0;
-      pelvis.position.y = 0.92 - strideBob - landCompression + jumpTuck;
-      pelvis.rotation.y = swing * 0.1 * moveWeight;
-      pelvis.rotation.z = idleSway;
+      const walkPelvisY = 0.92 - strideBob - landCompression + jumpTuck;
+      const climbBob = Math.abs(Math.cos(climbPhase)) * 0.035 * (activeClimbMove ? 1 : 0);
+      pelvis.position.y = THREE.MathUtils.lerp(walkPelvisY, 0.88 + climbBob, climbBlend);
+      pelvis.position.z = THREE.MathUtils.lerp(0, -0.09, climbBlend);
+      pelvis.rotation.y = THREE.MathUtils.lerp(
+        swing * 0.1 * moveWeight,
+        Math.sin(climbPhase) * 0.08,
+        climbBlend
+      );
+      pelvis.rotation.z = idleSway * (1 - climbBlend);
 
       const weightLean = loadRatio * 0.13 + (staminaExhausted ? 0.08 : 0);
-      torso.rotation.x =
+      const walkTorsoX =
         THREE.MathUtils.lerp(0.05, 0.22, sprintBlend) * moveWeight +
         weightLean +
         breathe +
         landCompression * 0.8;
-      torso.rotation.y = -swing * 0.12 * moveWeight;
+      const climbTorsoX = 0.34 + breathe * 1.2;
+      torso.rotation.x = THREE.MathUtils.lerp(walkTorsoX, climbTorsoX, climbBlend);
+      torso.rotation.y = THREE.MathUtils.lerp(
+        -swing * 0.12 * moveWeight,
+        -Math.sin(climbPhase) * 0.16,
+        climbBlend
+      );
 
-      headGroup.rotation.x = -torso.rotation.x * 0.55 + breathe * 0.5;
-      headGroup.rotation.y = Math.sin(elapsed * 0.55) * 0.06 * (1 - moveWeight) + shiver * 1.4;
+      headGroup.rotation.x = THREE.MathUtils.lerp(
+        -torso.rotation.x * 0.55 + breathe * 0.5,
+        -0.36,
+        climbBlend
+      );
+      headGroup.rotation.y =
+        (Math.sin(elapsed * 0.55) * 0.06 * (1 - moveWeight) + shiver * 1.4) * (1 - climbBlend);
 
       const leftHipAngle = swing * legAmp;
       const rightHipAngle = -swing * legAmp;
@@ -1245,19 +1375,73 @@ export function createDrifterCharacter(
       const rightKneeBend =
         Math.max(0, swingCos) * (0.65 + sprintBlend * 0.45) * moveWeight + (!isGrounded ? 0.25 : 0);
 
-      leftLeg.hip.rotation.x = leftHipAngle - landCompression * 1.4;
-      rightLeg.hip.rotation.x = rightHipAngle - landCompression * 1.4;
-      leftLeg.knee.rotation.x = leftKneeBend + landCompression * 2.4;
-      rightLeg.knee.rotation.x = rightKneeBend + landCompression * 2.4;
-      leftLeg.ankle.rotation.x = -leftHipAngle * 0.3 - leftKneeBend * 0.35;
-      rightLeg.ankle.rotation.x = -rightHipAngle * 0.3 - rightKneeBend * 0.35;
+      // Climbing leg footholds alternate in opposition to overhead hand reaches
+      const reachL = Math.sin(climbPhase);
+      const reachR = -reachL;
+      const climbHipL = -0.58 - reachR * 0.38;
+      const climbHipR = -0.58 - reachL * 0.38;
+      const climbKneeL = 0.92 + Math.max(0, reachR) * 0.48;
+      const climbKneeR = 0.92 + Math.max(0, reachL) * 0.48;
 
-      leftArm.shoulder.rotation.x = -swing * armAmp;
-      rightArm.shoulder.rotation.x = swing * armAmp;
-      leftArm.shoulder.rotation.z = 0.1 + breathe * 0.6;
-      rightArm.shoulder.rotation.z = -0.1 - breathe * 0.6;
-      leftArm.elbow.rotation.x = -0.25 - Math.max(0, swing) * 0.45 * moveWeight;
-      rightArm.elbow.rotation.x = -0.25 - Math.max(0, -swing) * 0.45 * moveWeight;
+      leftLeg.hip.rotation.x = THREE.MathUtils.lerp(
+        leftHipAngle - landCompression * 1.4,
+        climbHipL,
+        climbBlend
+      );
+      rightLeg.hip.rotation.x = THREE.MathUtils.lerp(
+        rightHipAngle - landCompression * 1.4,
+        climbHipR,
+        climbBlend
+      );
+      leftLeg.knee.rotation.x = THREE.MathUtils.lerp(
+        leftKneeBend + landCompression * 2.4,
+        climbKneeL,
+        climbBlend
+      );
+      rightLeg.knee.rotation.x = THREE.MathUtils.lerp(
+        rightKneeBend + landCompression * 2.4,
+        climbKneeR,
+        climbBlend
+      );
+      leftLeg.ankle.rotation.x = THREE.MathUtils.lerp(
+        -leftHipAngle * 0.3 - leftKneeBend * 0.35,
+        -0.28,
+        climbBlend
+      );
+      rightLeg.ankle.rotation.x = THREE.MathUtils.lerp(
+        -rightHipAngle * 0.3 - rightKneeBend * 0.35,
+        -0.28,
+        climbBlend
+      );
+
+      // Hand-over-hand rock gripping reaches (-X rotates hanging arm forward & overhead onto rock face)
+      const climbArmL = -1.72 - reachL * 0.62;
+      const climbArmR = -1.72 - reachR * 0.62;
+      const climbElbowL = -0.78 + reachL * 0.36;
+      const climbElbowR = -0.78 + reachR * 0.36;
+
+      leftArm.shoulder.rotation.x = THREE.MathUtils.lerp(-swing * armAmp, climbArmL, climbBlend);
+      rightArm.shoulder.rotation.x = THREE.MathUtils.lerp(swing * armAmp, climbArmR, climbBlend);
+      leftArm.shoulder.rotation.z = THREE.MathUtils.lerp(
+        0.1 + breathe * 0.6,
+        0.22 + reachL * 0.08,
+        climbBlend
+      );
+      rightArm.shoulder.rotation.z = THREE.MathUtils.lerp(
+        -0.1 - breathe * 0.6,
+        -0.22 - reachR * 0.08,
+        climbBlend
+      );
+      leftArm.elbow.rotation.x = THREE.MathUtils.lerp(
+        -0.25 - Math.max(0, swing) * 0.45 * moveWeight,
+        climbElbowL,
+        climbBlend
+      );
+      rightArm.elbow.rotation.x = THREE.MathUtils.lerp(
+        -0.25 - Math.max(0, -swing) * 0.45 * moveWeight,
+        climbElbowR,
+        climbBlend
+      );
 
       // Odradek Shoulder Scanner Unfold & Spin
       if (scanTimer > 0) {

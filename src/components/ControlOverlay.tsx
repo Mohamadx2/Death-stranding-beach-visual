@@ -11,6 +11,7 @@ import {
   Heart,
   LogOut,
   Menu,
+  Moon,
   Music,
   Package,
   Play,
@@ -21,6 +22,7 @@ import {
   Sparkles,
   Square,
   Sun,
+  Sunrise,
   ThermometerSnowflake,
   Trash2,
   Upload,
@@ -34,6 +36,7 @@ import { CraftableEquipmentId, EQUIPMENT_COSTS } from '../scene/equipment';
 import { ATMOSPHERE_PRESETS, AtmospherePresetId } from '../scene/materials';
 import { SaveSlotSummary } from '../scene/saveSystem';
 import { shorelineZAt } from '../scene/terrain';
+import { TimeOfDayMode } from '../scene/timeOfDay';
 import { WeatherMode } from '../scene/weather';
 
 export type MenuMode = 'closed' | 'pause' | 'title';
@@ -42,6 +45,7 @@ interface ControlOverlayProps {
   telemetry: SceneTelemetry;
   preset: AtmospherePresetId;
   weatherMode: WeatherMode;
+  timeMode: TimeOfDayMode;
   cameraMode: CameraMode;
   audioEnabled: boolean;
   contextLost: boolean;
@@ -50,6 +54,7 @@ interface ControlOverlayProps {
   saveNotice: string | null;
   onSelectPreset: (preset: AtmospherePresetId) => void;
   onSelectWeather: (mode: WeatherMode) => void;
+  onSelectTimeMode: (mode: TimeOfDayMode) => void;
   onSelectCamera: (mode: CameraMode) => void;
   onTriggerScan: () => void;
   onToggleAudio: () => void;
@@ -105,6 +110,7 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
   telemetry,
   preset,
   weatherMode,
+  timeMode,
   cameraMode,
   audioEnabled,
   contextLost,
@@ -113,6 +119,7 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
   saveNotice,
   onSelectPreset,
   onSelectWeather,
+  onSelectTimeMode,
   onSelectCamera,
   onTriggerScan,
   onToggleAudio,
@@ -319,9 +326,15 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
                 </span>
               </div>
 
-              {(equipment.nearAnchorAssist || equipment.onLadder) && (
+              {(equipment.nearAnchorAssist || equipment.onLadder || telemetry.isClimbing) && (
                 <div className="font-mono-tabular text-[11px] text-sky-300">
-                  {equipment.onLadder ? 'Bridge Ladder' : 'Anchor Assist'}
+                  {equipment.onLadder
+                    ? 'Bridge Ladder'
+                    : telemetry.isClimbing
+                      ? `Hand Climbing ${telemetry.climbSlopeDeg}°${
+                          equipment.nearAnchorAssist ? ' · Anchor Assist' : ''
+                        }`
+                      : 'Anchor Assist'}
                 </div>
               )}
 
@@ -460,6 +473,18 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
                         : 'Snowy'
                   }`
                 : ''}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span
+              className={
+                telemetry.timeOfDay.phaseLabel === 'Night'
+                  ? 'text-indigo-200'
+                  : telemetry.timeOfDay.phaseLabel === 'Daylight'
+                    ? 'text-slate-200'
+                    : 'text-amber-300'
+              }
+            >
+              {telemetry.timeOfDay.formattedTime} · {telemetry.timeOfDay.phaseLabel}
             </span>
             {telemetry.isWading && (
               <>
@@ -1013,7 +1038,7 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
         </button>
 
         <div
-          className={`pointer-events-auto w-full max-w-[980px] transition-all duration-200 ${
+          className={`pointer-events-auto w-full max-w-[1120px] transition-all duration-200 ${
             collapsed
               ? 'pointer-events-none translate-y-24 opacity-0'
               : 'translate-y-0 opacity-100'
@@ -1021,6 +1046,39 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
         >
           <div className="flex flex-col gap-2.5 rounded-xl border border-white/12 bg-[#0e1217]/88 px-4 py-3 shadow-2xl">
             <div className="flex flex-wrap items-center justify-between gap-2.5">
+              {/* Time of Day Cycle Selector */}
+              <div className="flex items-center gap-1 rounded-lg bg-white/5 p-1">
+                {(
+                  [
+                    { id: 'auto', label: 'Cycle' },
+                    { id: 'day', label: 'Day' },
+                    { id: 'dusk', label: 'Dusk' },
+                    { id: 'night', label: 'Night' },
+                  ] as const
+                ).map((item) => {
+                  const active = timeMode === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => onSelectTimeMode(item.id)}
+                      className={`flex items-center gap-1 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                        active
+                          ? item.id === 'night'
+                            ? 'bg-indigo-300 text-slate-950'
+                            : 'bg-amber-200 text-slate-950'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      {item.id === 'day' && <Sun className="h-3.5 w-3.5" />}
+                      {item.id === 'dusk' && <Sunrise className="h-3.5 w-3.5" />}
+                      {item.id === 'night' && <Moon className="h-3.5 w-3.5" />}
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
               {/* Dynamic Weather Selector */}
               <div className="flex items-center gap-1 rounded-lg bg-white/5 p-1">
                 {(

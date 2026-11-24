@@ -12,6 +12,7 @@ import {
   groundNormalAt,
   shorelineZAt,
 } from './terrain';
+import { TimeOfDaySnapshot } from './timeOfDay';
 import { WeatherSnapshot } from './weather';
 
 export const WOODEN_POST_POS = { x: 14, z: 36 };
@@ -34,6 +35,9 @@ export interface BeachEnvironment {
     uCloudCoverage: { value: number };
     uStormDarkness: { value: number };
     uClearShafts: { value: number };
+    uDaylight: { value: number };
+    uTwilight: { value: number };
+    uSunDir: { value: THREE.Vector3 };
   };
   weatherUniforms: {
     uRainWetness: { value: number };
@@ -49,6 +53,7 @@ export interface BeachEnvironment {
   triggerBoundaryImpact: (x: number, z: number, nx: number, nz: number) => void;
   applyPreset: (presetId: AtmospherePresetId) => void;
   applyWeather: (weather: WeatherSnapshot) => void;
+  applyTimeOfDay: (time: TimeOfDaySnapshot) => void;
   update: (elapsed: number, delta: number, playerPos: THREE.Vector3) => void;
   dispose: () => void;
 }
@@ -195,7 +200,7 @@ export function createBeachEnvironment(
     uSnowAccumulation: { value: 0 },
   };
 
-  // 1. Overcast Atmospheric Sky Dome with Procedural Volumetric Clouds & Sun Shafts
+  // 1. Overcast Atmospheric Sky Dome with Procedural Volumetric Clouds, Day/Night & Stars
   const skyUniforms = {
     uTopColor: { value: new THREE.Color(initialPreset.skyTop) },
     uHorizonColor: { value: new THREE.Color(initialPreset.skyHorizon) },
@@ -204,6 +209,9 @@ export function createBeachEnvironment(
     uCloudCoverage: { value: 0.42 },
     uStormDarkness: { value: 0.0 },
     uClearShafts: { value: 1.0 },
+    uDaylight: { value: 1.0 },
+    uTwilight: { value: 0.0 },
+    uSunDir: { value: new THREE.Vector3(-0.35, 0.36, -0.86).normalize() },
   };
 
   const skyGeo = new THREE.SphereGeometry(780, 32, 24);
@@ -227,6 +235,9 @@ export function createBeachEnvironment(
       uniform float uCloudCoverage;
       uniform float uStormDarkness;
       uniform float uClearShafts;
+      uniform float uDaylight;
+      uniform float uTwilight;
+      uniform vec3 uSunDir;
       varying vec3 vWorldDir;
 
       float hash(vec2 p) {
@@ -260,14 +271,13 @@ export function createBeachEnvironment(
         float horizonBlend = pow(1.0 - h, 1.65);
         vec3 baseSky = mix(uTopColor, uHorizonColor, horizonBlend);
 
-        // Two-layer parallax volumetric cloud deck with directional sun self-shadowing
+        // Two-layer parallax volumetric cloud deck with directional sun/moon self-shadowing
         vec2 cloudUv = dir.xz / (h + 0.14) * 1.15;
         float drift = uTime * (0.009 + uStormDarkness * 0.014);
-        vec3 sunDir = normalize(vec3(-0.35, 0.36, -0.86));
+        vec3 sunDir = normalize(uSunDir);
 
         float n1 = fbm(cloudUv * 1.1 + vec2(drift, drift * 0.45));
         float n2 = fbm(cloudUv * 2.65 - vec2(drift * 0.65, 0.0) + n1 * 0.65);
-        // Sample density offset toward the sun to approximate volumetric cloud thickness
         float sunSample = fbm((cloudUv - sunDir.xz * 0.12) * 1.1 + vec2(drift, drift * 0.45));
 
         float rawDensity = n1 * 0.62 + n2 * 0.48;
@@ -278,21 +288,38 @@ export function createBeachEnvironment(
         float selfShadow = clamp((sunSample - n1) * 2.4 + 0.52, 0.15, 1.0);
         vec3 cloudBelly = uTopColor * mix(0.76, 0.46, uStormDarkness);
         vec3 cloudCrest = min(vec3(0.97), uHorizonColor * mix(1.14, 0.88, uStormDarkness));
+        cloudCrest = mix(cloudCrest, vec3(0.94, 0.64, 0.46), uTwilight * 0.38);
         vec3 cloudCol = mix(cloudBelly, cloudCrest, selfShadow);
 
         // Diffused sun glow & clear-weather volumetric crepuscular rays
         float sunAlign = max(0.0, dot(dir, sunDir));
         float sunGlow = pow(sunAlign, 4.0);
-        float rayPattern = 0.5 + 0.5 * sin(atan(dir.x - sunDir.x, dir.y - sunDir.y + 0.25) * 9.0 + uTime * 0.08);
-        float sunShafts = pow(sunAlign, 2.2) * rayPattern * (1.0 - cloudAlpha * 0.65) * uClearShafts * 0.22;
-        cloudCol += vec3(0.14, 0.15, 0.16) * sunGlow * (1.0 - uStormDarkness * 0.55);
+        float rayPattern = 0.5 + 0.5 * sin(atan(dir.x - sunDir.x, dir.y - sunDir.y + 0.25) * 7.0 + uTime * 0.06);
+        float sunShafts = pow(sunAlign, 3.2) * rayPattern * (1.0 - cloudAlpha * 0.72) * uClearShafts * uDaylight * 0.08;
+        vec3 glowTint = mix(vec3(0.14, 0.15, 0.16), vec3(0.32, 0.18, 0.10), uTwilight);
+        cloudCol += glowTint * sunGlow * (1.0 - uStormDarkness * 0.55) * (0.25 + 0.75 * uDaylight);
 
         float cloudMask = smoothstep(0.01, 0.22, h);
         vec3 skyWithClouds = mix(baseSky, cloudCol, cloudAlpha * cloudMask);
         vec3 col = mix(uHorizonColor, skyWithClouds, smoothstep(0.0, 0.18, h));
         col += vec3(0.88, 0.91, 0.94) * sunShafts * cloudMask;
 
-        // Subtle inverted rainbow in upper cloud mist (stronger during light clear/rain breaks)
+        // Subtle pinpoint stars & pale moon halo during night breaks
+        float nightMask = 1.0 - smoothstep(0.08, 0.55, uDaylight);
+        if (nightMask > 0.01) {
+          vec2 starUv = dir.xz / (h + 0.34) * 58.0;
+          float starRand = hash(floor(starUv));
+          float starPoint = step(0.9935, starRand) * smoothstep(0.42, 0.05, length(fract(starUv) - 0.5));
+          float twinkle = 0.68 + 0.32 * sin(uTime * 2.1 + starRand * 42.0);
+          float starVis = nightMask * (1.0 - cloudAlpha * 0.92) * smoothstep(0.08, 0.34, h) * (1.0 - uStormDarkness * 0.85);
+          col += vec3(0.82, 0.88, 0.98) * starPoint * twinkle * starVis * 0.85;
+
+          float moonDisc = smoothstep(0.9984, 0.9994, sunAlign) * (1.0 - cloudAlpha * 0.78);
+          float moonHalo = pow(sunAlign, 18.0) * (1.0 - cloudAlpha * 0.55);
+          col += (vec3(0.84, 0.90, 0.98) * moonDisc * 0.68 + vec3(0.36, 0.46, 0.62) * moonHalo * 0.26) * nightMask * cloudMask;
+        }
+
+        // Subtle inverted rainbow in upper cloud mist (daytime clear/rain breaks)
         vec3 arcCenter = normalize(vec3(0.18, 0.62, -0.95));
         float ang = acos(clamp(dot(dir, arcCenter), -1.0, 1.0));
         float band = smoothstep(0.46, 0.50, ang) * (1.0 - smoothstep(0.50, 0.55, ang));
@@ -303,7 +330,7 @@ export function createBeachEnvironment(
           mix(vec3(0.70, 0.74, 0.56), vec3(0.78, 0.56, 0.46), smoothstep(0.4, 1.0, t)),
           smoothstep(0.0, 0.6, t)
         );
-        col += rainbow * band * arcMask * uRainbowStrength * 0.26;
+        col += rainbow * band * arcMask * uRainbowStrength * uDaylight * 0.26;
 
         gl_FragColor = vec4(col, 1.0);
       }
@@ -422,8 +449,8 @@ export function createBeachEnvironment(
         float shoreBand = smoothstep(5.0, 14.0, inlandDist) * (1.0 - smoothstep(18.0, 36.0, inlandDist));
         float lowHollow = smoothstep(8.0, 24.0, inlandDist) * (1.0 - smoothstep(1.3, 3.3, vTerrainWorldPos.y));
         float cobblePatch = smoothstep(0.44, 0.76, sin(vTerrainWorldPos.x * 0.072 + vTerrainWorldPos.z * 0.064) * 0.5 + 0.5);
-        float cobbleMask = clamp((shoreBand * 0.75 + lowHollow * 0.85) * (0.45 + 0.55 * cobblePatch) * (1.0 - desertDistMask * 0.9) * slopeMask, 0.0, 0.88);
-        vec3 cobbleCol = texture2D(uCobbleMap, vTerrainWorldPos.xz * 0.16).rgb;
+        float cobbleMask = clamp((shoreBand * 0.72 + lowHollow * 0.82) * (0.40 + 0.60 * cobblePatch) * (1.0 - desertDistMask * 0.9) * slopeMask, 0.0, 0.82);
+        vec3 cobbleCol = texture2D(uCobbleMap, vTerrainWorldPos.xz * 0.48).rgb;
         diffuseColor.rgb = mix(diffuseColor.rgb, cobbleCol, cobbleMask);
 
         // Expanded lush highland moss & grassy meadow turf (Reference Images 1 & 2)
@@ -1564,29 +1591,28 @@ export function createBeachEnvironment(
   };
 
   let currentBasePreset: AtmospherePresetId = 'ash';
+  let latestWeather: WeatherSnapshot | null = null;
+  let latestTime: TimeOfDaySnapshot | null = null;
 
-  const applyPreset = (presetId: AtmospherePresetId) => {
-    currentBasePreset = presetId;
-    const p = ATMOSPHERE_PRESETS[presetId];
-    skyUniforms.uTopColor.value.setHex(p.skyTop);
-    skyUniforms.uHorizonColor.value.setHex(p.skyHorizon);
-    skyUniforms.uRainbowStrength.value = p.rainbowStrength;
-    waterMat.color.setHex(p.waterDeep);
-    if (waterMat.userData.shader) {
-      waterMat.userData.shader.uniforms.uWaterShallow.value.setHex(p.waterShallow);
-    }
-  };
-
-  const applyWeather = (weather: WeatherSnapshot) => {
+  const syncSkyAndRefuge = () => {
     const p = ATMOSPHERE_PRESETS[currentBasePreset];
-    weatherUniforms.uRainWetness.value = weather.rainWetness;
-    weatherUniforms.uSnowAccumulation.value = weather.snowAccumulation;
+    const w = latestWeather;
+    const t = latestTime;
 
-    skyUniforms.uCloudCoverage.value = weather.cloudCoverage;
-    skyUniforms.uStormDarkness.value = weather.rainWeight * 0.85 + weather.snowWeight * 0.18;
-    skyUniforms.uClearShafts.value = weather.clearWeight;
+    const rainW = w ? w.rainWeight : 0;
+    const snowW = w ? w.snowWeight : 0;
+    const clearW = w ? w.clearWeight : 1;
 
-    // Modulate base sky colors smoothly toward stormy slate (rain) or frosty pale mist (snow)
+    const daylight = t ? t.daylight : 1;
+    const twilight = t ? t.twilight : 0;
+    const nightW = t ? t.nightWeight : 0;
+
+    if (t) {
+      skyUniforms.uDaylight.value = daylight;
+      skyUniforms.uTwilight.value = twilight;
+      skyUniforms.uSunDir.value.copy(t.celestialDir);
+    }
+
     const baseTop = new THREE.Color(p.skyTop);
     const baseHorizon = new THREE.Color(p.skyHorizon);
     const rainTop = new THREE.Color(0x4b5560);
@@ -1594,19 +1620,63 @@ export function createBeachEnvironment(
     const snowTop = new THREE.Color(0xa6b2be);
     const snowHorizon = new THREE.Color(0xdde4ec);
 
-    skyUniforms.uTopColor.value
-      .copy(baseTop)
-      .lerp(rainTop, weather.rainWeight * 0.78)
-      .lerp(snowTop, weather.snowWeight * 0.62);
-    skyUniforms.uHorizonColor.value
-      .copy(baseHorizon)
-      .lerp(rainHorizon, weather.rainWeight * 0.76)
-      .lerp(snowHorizon, weather.snowWeight * 0.68);
-    skyUniforms.uRainbowStrength.value =
-      p.rainbowStrength * (1.0 - weather.snowWeight * 0.85);
+    baseTop
+      .lerp(rainTop, rainW * 0.78)
+      .lerp(snowTop, snowW * 0.62);
+    baseHorizon
+      .lerp(rainHorizon, rainW * 0.76)
+      .lerp(snowHorizon, snowW * 0.68);
 
-    // Subtle ash particles thin out during heavy rain/snow
-    pMat.opacity = 0.42 * (0.35 + weather.clearWeight * 0.65);
+    // Dusk/Dawn warm tint & Night slate darkening
+    const twilightTop = new THREE.Color(0x3a4056);
+    const twilightHorizon = new THREE.Color(0x9b664f);
+    const nightTop = new THREE.Color(0x101826);
+    const nightHorizon = new THREE.Color(snowW > 0.35 ? 0x2b3648 : 0x1d2736);
+
+    baseTop
+      .lerp(twilightTop, twilight * 0.55)
+      .lerp(nightTop, nightW * 0.86);
+    baseHorizon
+      .lerp(twilightHorizon, twilight * 0.48)
+      .lerp(nightHorizon, nightW * 0.84);
+
+    skyUniforms.uTopColor.value.copy(baseTop);
+    skyUniforms.uHorizonColor.value.copy(baseHorizon);
+    skyUniforms.uRainbowStrength.value =
+      p.rainbowStrength * (1.0 - snowW * 0.85) * daylight;
+
+    // Water reflects darker midnight tone at night
+    const waterDeepCol = new THREE.Color(p.waterDeep).lerp(new THREE.Color(0x0c121b), nightW * 0.65);
+    const waterShallowCol = new THREE.Color(p.waterShallow).lerp(new THREE.Color(0x16202e), nightW * 0.6);
+    waterMat.color.copy(waterDeepCol);
+    if (waterMat.userData.shader) {
+      waterMat.userData.shader.uniforms.uWaterShallow.value.copy(waterShallowCol);
+    }
+
+    // Subtle ash particles & warm refuge cabin stove glow brighter at night
+    pMat.opacity = 0.42 * (0.35 + clearW * 0.65) * (0.5 + 0.5 * daylight);
+    hutWarmLight.intensity = 2.6 + nightW * 2.3;
+    emberGlowMat.emissiveIntensity = 2.2 + nightW * 1.4;
+  };
+
+  const applyPreset = (presetId: AtmospherePresetId) => {
+    currentBasePreset = presetId;
+    syncSkyAndRefuge();
+  };
+
+  const applyWeather = (weather: WeatherSnapshot) => {
+    latestWeather = weather;
+    weatherUniforms.uRainWetness.value = weather.rainWetness;
+    weatherUniforms.uSnowAccumulation.value = weather.snowAccumulation;
+    skyUniforms.uCloudCoverage.value = weather.cloudCoverage;
+    skyUniforms.uStormDarkness.value = weather.rainWeight * 0.85 + weather.snowWeight * 0.18;
+    skyUniforms.uClearShafts.value = weather.clearWeight;
+    syncSkyAndRefuge();
+  };
+
+  const applyTimeOfDay = (time: TimeOfDaySnapshot) => {
+    latestTime = time;
+    syncSkyAndRefuge();
   };
 
   const update = (elapsed: number, delta: number, playerPos: THREE.Vector3) => {
@@ -1678,6 +1748,7 @@ export function createBeachEnvironment(
     triggerBoundaryImpact,
     applyPreset,
     applyWeather,
+    applyTimeOfDay,
     update,
     dispose,
   };
