@@ -6,6 +6,7 @@ import { CharacterController, createDrifterCharacter } from './character';
 import { CrystalSystem, createChiralCrystalSystem } from './crystals';
 import {
   BeachEnvironment,
+  NearbyUmbrellaStation,
   REFUGE_HUT_POS,
   createBeachEnvironment,
 } from './environment';
@@ -13,6 +14,9 @@ import {
   CraftableEquipmentId,
   EquipmentSnapshot,
   EquipmentSystem,
+  GEAR_SERVICE_COSTS,
+  GearServiceMode,
+  GearSlot,
   createEquipmentSystem,
 } from './equipment';
 import {
@@ -24,6 +28,7 @@ import {
 import {
   BEACH_PLAYABLE_RADIUS,
   MUSIC_TRIGGER_POINT,
+  UMBRELLA_STATIONS,
   groundHeightAt,
   shorelineZAt,
 } from './terrain';
@@ -46,6 +51,7 @@ import {
   setSavedPlayerName,
 } from './saveSystem';
 import { WormSystem, createWormSystem } from './worms';
+import { LowPolyTreeSystem, createLowPolyTrees } from './trees';
 
 export type CameraMode = 'shoulder' | 'vista';
 
@@ -82,6 +88,7 @@ export interface SceneTelemetry {
   speed: number;
   isWading: boolean;
   isClimbing: boolean;
+  isSlipping: boolean;
   climbSlopeDeg: number;
   health: number;
   maxHealth: number;
@@ -90,8 +97,13 @@ export interface SceneTelemetry {
   staminaExhausted: boolean;
   staminaCooldownRemaining: number;
   cold: number;
+  bootsDurability: number;
+  suitDurability: number;
+  lastFallDamage: number | null;
+  rescueNotice: string | null;
   insideBuilding: boolean;
   buildingName: string | null;
+  nearbyUmbrellaStation: NearbyUmbrellaStation | null;
   wormsInPouch: number;
   maxWormsInPouch: number;
   nearbyWorm: boolean;
@@ -136,6 +148,7 @@ export class BeachExperience {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private environment: BeachEnvironment;
+  private trees: LowPolyTreeSystem;
   private weather: WeatherSystem;
   private timeOfDay: TimeOfDaySystem;
   private character: CharacterController;
@@ -182,12 +195,16 @@ export class BeachExperience {
   private scanActive = false;
   private scanProgress = 0;
 
-  // Callbacks, Boundary & Music Trigger Feedback
+  // Callbacks, Boundary, Fall & Music Trigger Feedback
   private onTelemetry?: (t: SceneTelemetry) => void;
   private onContextLost?: (lost: boolean) => void;
   private lastTelemetryTime = 0;
   private boundaryNoticeTimer = 0;
   private lastBoundaryAudioTime = -10;
+  private fallDamageBannerTimer = 0;
+  private lastFallDamageAmount = 0;
+  private rescueNoticeTimer = 0;
+  private rescueNoticeText = '';
   private musicTriggered = false;
   private musicBannerTimer = 0;
   private container: HTMLElement;
@@ -226,7 +243,7 @@ export class BeachExperience {
     this.scene.fog = this.fog;
     this.scene.background = new THREE.Color(initialPreset.fogColor);
 
-    this.camera = new THREE.PerspectiveCamera(52, width / height, 0.15, 960);
+    this.camera = new THREE.PerspectiveCamera(52, width / height, 0.15, 1400);
 
     // Mandatory studio environment map for metallic & wet-surface PBR speculars
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
@@ -272,6 +289,9 @@ export class BeachExperience {
     this.textures = createProceduralTextures(maxAniso);
     this.environment = createBeachEnvironment(this.textures, this.isSoftwareGl);
     this.scene.add(this.environment.group);
+
+    this.trees = createLowPolyTrees(this.environment.colliders, this.isSoftwareGl);
+    this.scene.add(this.trees.group);
 
     this.weather = createWeatherSystem(this.textures, this.isSoftwareGl);
     this.scene.add(this.weather.group);
@@ -354,10 +374,6 @@ export class BeachExperience {
 
   public setTimeMode(mode: TimeOfDayMode): void {
     this.timeOfDay.setMode(mode);
-    // Snap immediately when explicitly selected in UI for crisp visual feedback
-    if (mode !== 'auto') {
-      this.timeOfDay.update(5);
-    }
     this.lastTimeSnapshot = this.timeOfDay.getSnapshot();
     this.environment.applyTimeOfDay(this.lastTimeSnapshot);
     this.pushTelemetryNow();
@@ -495,6 +511,35 @@ export class BeachExperience {
     }
   }
 
+  public serviceGearAtStation(slot: GearSlot, mode: GearServiceMode): boolean {
+    const station = this.environment.getNearbyUmbrellaStation(
+      this.character.position.x,
+      this.character.position.z
+    );
+    if (!station) return false;
+
+    if (mode === 'repair') {
+      if (slot === 'boots' && this.character.bootsDurability >= 99.5) return false;
+      if (slot === 'suit' && this.character.suitDurability >= 99.5) return false;
+    }
+
+    const cost =
+      slot === 'boots'
+        ? mode === 'craft'
+          ? GEAR_SERVICE_COSTS.craftBoots
+          : GEAR_SERVICE_COSTS.repairBoots
+        : mode === 'craft'
+          ? GEAR_SERVICE_COSTS.craftSuit
+          : GEAR_SERVICE_COSTS.repairSuit;
+
+    if (!this.equipment.spendCrystals(cost)) return false;
+
+    this.character.repairGear(slot, mode);
+    this.audio.playStationRepair();
+    this.pushTelemetryNow();
+    return true;
+  }
+
   public async setCustomMusicFile(file: File): Promise<void> {
     await this.audio.setCustomMusicFile(file);
     this.pushTelemetryNow();
@@ -541,6 +586,8 @@ export class BeachExperience {
       stamina: this.character.stamina,
       staminaExhausted: this.character.staminaExhausted,
       cold: this.character.cold,
+      bootsDurability: this.character.bootsDurability,
+      suitDurability: this.character.suitDurability,
       wormsInPouch: this.wormsInPouch,
       preset: this.currentPresetId,
       weatherMode: this.lastWeatherSnapshot.mode,
@@ -589,6 +636,8 @@ export class BeachExperience {
       stamina: data.stamina ?? 100,
       staminaExhausted: Boolean(data.staminaExhausted),
       cold: data.cold ?? 14,
+      bootsDurability: data.bootsDurability ?? 100,
+      suitDurability: data.suitDurability ?? 100,
       playerName: cleanName,
     });
     const cargoStatus = this.cargo.getStatus(this.character.position);
@@ -639,6 +688,7 @@ export class BeachExperience {
     const nearCrystal = this.crystals.getNearbyCrystal(p);
     const nearWorm = this.worms.getNearbyWorm(p);
     const customInfo = this.audio.getCustomTrackInfo();
+    const nearbyStation = this.environment.getNearbyUmbrellaStation(p.x, p.z);
     this.onTelemetry({
       x: p.x,
       z: p.z,
@@ -647,6 +697,7 @@ export class BeachExperience {
       speed: this.character.speed,
       isWading: this.character.isWading,
       isClimbing: this.character.isClimbing,
+      isSlipping: this.character.isSlipping,
       climbSlopeDeg: this.character.climbSlopeDeg,
       health: this.character.health,
       maxHealth: this.character.maxHealth,
@@ -655,8 +706,13 @@ export class BeachExperience {
       staminaExhausted: this.character.staminaExhausted,
       staminaCooldownRemaining: this.character.staminaCooldownRemaining,
       cold: this.character.cold,
+      bootsDurability: this.character.bootsDurability,
+      suitDurability: this.character.suitDurability,
+      lastFallDamage: this.fallDamageBannerTimer > 0 ? this.lastFallDamageAmount : null,
+      rescueNotice: this.rescueNoticeTimer > 0 ? this.rescueNoticeText : null,
       insideBuilding: this.character.insideBuilding,
       buildingName: this.character.buildingName,
+      nearbyUmbrellaStation: nearbyStation,
       wormsInPouch: this.wormsInPouch,
       maxWormsInPouch: this.maxWormsInPouch,
       nearbyWorm: nearWorm !== null,
@@ -725,6 +781,11 @@ export class BeachExperience {
     }
     if (e.code === 'KeyT') {
       this.shiftCargoToCart();
+    }
+    if (e.code === 'KeyU') {
+      const slot: GearSlot =
+        this.character.bootsDurability <= this.character.suitDurability ? 'boots' : 'suit';
+      this.serviceGearAtStation(slot, 'repair');
     }
   };
 
@@ -853,6 +914,13 @@ export class BeachExperience {
       );
 
       if (!this.paused) {
+        if (this.fallDamageBannerTimer > 0) {
+          this.fallDamageBannerTimer = Math.max(0, this.fallDamageBannerTimer - delta);
+        }
+        if (this.rescueNoticeTimer > 0) {
+          this.rescueNoticeTimer = Math.max(0, this.rescueNoticeTimer - delta);
+        }
+
         this.character.update(
           delta,
           elapsed,
@@ -874,6 +942,46 @@ export class BeachExperience {
           this.environment.colliders,
           (event) => {
             this.audio.playFootstep(event.surface, event.heavyCargo, event.weightKg);
+          },
+          (fallEvent) => {
+            this.audio.playFallImpact(Math.min(1, fallEvent.damage / 50));
+            this.lastFallDamageAmount = fallEvent.damage;
+            this.fallDamageBannerTimer = 2.6;
+
+            if (this.character.health <= 0) {
+              const px = this.character.position.x;
+              const pz = this.character.position.z;
+              let nearest = UMBRELLA_STATIONS[0];
+              let bestDist = Infinity;
+              for (let i = 0; i < UMBRELLA_STATIONS.length; i++) {
+                const st = UMBRELLA_STATIONS[i];
+                const d = Math.hypot(px - st.x, pz - st.z);
+                if (d < bestDist) {
+                  bestDist = d;
+                  nearest = st;
+                }
+              }
+              this.character.restoreState({
+                x: nearest.x,
+                y: groundHeightAt(nearest.x, nearest.z),
+                z: nearest.z + 1.4,
+                yaw: Math.PI,
+                health: 65,
+                stamina: 85,
+                staminaExhausted: false,
+                cold: 22,
+                bootsDurability: Math.max(25, this.character.bootsDurability),
+                suitDurability: Math.max(25, this.character.suitDurability),
+                playerName: this.character.playerName,
+              });
+              this.syncCameraImmediate();
+              this.rescueNoticeText = `Recovered at ${nearest.name}`;
+              this.rescueNoticeTimer = 3.8;
+            }
+            this.pushTelemetryNow();
+          },
+          () => {
+            this.audio.playSlipScrape();
           }
         );
       } else {
@@ -949,6 +1057,8 @@ export class BeachExperience {
 
       this.rimLight.color.copy(_dayRimColor).lerp(_nightRimColor, timeSnap.nightWeight);
       this.rimLight.intensity = 0.75 * (1 - timeSnap.nightWeight * 0.36);
+      this.scene.environmentIntensity =
+        1.0 - timeSnap.twilight * 0.18 - timeSnap.nightWeight * 0.72;
       this.renderer.toneMappingExposure =
         basePreset.exposure * (1 - timeSnap.nightWeight * 0.24);
 
@@ -1138,6 +1248,7 @@ export class BeachExperience {
     this.equipment.dispose();
     this.character.dispose();
     this.weather.dispose();
+    this.trees.dispose();
     this.environment.dispose();
     this.textures.dispose();
     this.envMapTexture.dispose();

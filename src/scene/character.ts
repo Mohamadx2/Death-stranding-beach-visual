@@ -6,15 +6,23 @@ import {
   ObstacleCollider,
   SEA_LEVEL,
   desertRockCoverageAt,
+  dirtRoadMaskAt,
   groundHeightAt,
   groundNormalAt,
   resolveCharacterCollisions,
+  riverInfoAt,
 } from './terrain';
 
 export interface FootstepEvent {
   surface: FootstepSurface;
   heavyCargo: boolean;
   weightKg: number;
+}
+
+export interface FallImpactEvent {
+  damage: number;
+  impactSpeed: number;
+  dropHeight: number;
 }
 
 export interface CharacterInputState {
@@ -42,6 +50,7 @@ export interface CharacterController {
   isSprinting: boolean;
   isWading: boolean;
   isClimbing: boolean;
+  isSlipping: boolean;
   climbSlopeDeg: number;
   health: number;
   maxHealth: number;
@@ -50,6 +59,8 @@ export interface CharacterController {
   staminaExhausted: boolean;
   staminaCooldownRemaining: number;
   cold: number;
+  bootsDurability: number;
+  suitDurability: number;
   insideBuilding: boolean;
   buildingName: string | null;
   carriedWeightKg: number;
@@ -58,6 +69,7 @@ export interface CharacterController {
   setPlayerName: (name: string) => void;
   damage: (amount: number) => void;
   applyWormFeeding: () => void;
+  repairGear: (slot: 'boots' | 'suit', mode: 'repair' | 'craft') => void;
   restoreState: (state: {
     x: number;
     y: number;
@@ -67,6 +79,8 @@ export interface CharacterController {
     stamina: number;
     staminaExhausted: boolean;
     cold: number;
+    bootsDurability?: number;
+    suitDurability?: number;
     playerName: string;
   }) => void;
   resetState: () => void;
@@ -76,7 +90,9 @@ export interface CharacterController {
     elapsed: number,
     input: CharacterInputState,
     colliders: ObstacleCollider[],
-    onFootstep?: (event: FootstepEvent) => void
+    onFootstep?: (event: FootstepEvent) => void,
+    onFallImpact?: (event: FallImpactEvent) => void,
+    onSlip?: () => void
   ) => void;
   dispose: () => void;
 }
@@ -842,14 +858,18 @@ export function createDrifterCharacter(
     entry.mat.opacity = h < 0.6 ? 0.72 : 0.52;
   };
 
-  // Physics, Health, Weight, Stamina, Cold & Climbing State
+  // Physics, Health, Weight, Stamina, Cold, Durability & Climbing State
   const velocity = new THREE.Vector3();
   let verticalVel = 0;
   let isGrounded = true;
+  let airPeakY = root.position.y;
   let yaw = Math.PI;
   let stridePhase = 0;
   let lastStepHalf = 0;
   let isClimbing = false;
+  let isSlipping = false;
+  let slipBlend = 0;
+  let lastSlipAudio = -10;
   let climbSlopeDeg = 0;
   let climbBlend = 0;
   let climbPhase = 0;
@@ -864,7 +884,15 @@ export function createDrifterCharacter(
   let staminaExhausted = false;
   let staminaCooldownRemaining = 0;
   let cold = 14;
+  let bootsDurability = 100;
+  let suitDurability = 100;
   let carriedWeightKg = 0;
+
+  const syncGearMaterials = () => {
+    bootMat.roughness = THREE.MathUtils.lerp(0.9, 0.46, bootsDurability / 100);
+    jacketMat.roughness = THREE.MathUtils.lerp(0.95, 0.72, suitDurability / 100);
+    jacketPanelMat.roughness = THREE.MathUtils.lerp(0.96, 0.78, suitDurability / 100);
+  };
 
   const triggerScan = () => {
     scanTimer = 1.6;
@@ -898,6 +926,17 @@ export function createDrifterCharacter(
     controller.cold = cold;
   };
 
+  const repairGear = (slot: 'boots' | 'suit', mode: 'repair' | 'craft') => {
+    if (slot === 'boots') {
+      bootsDurability = mode === 'craft' ? 100 : Math.min(100, bootsDurability + 55);
+      controller.bootsDurability = bootsDurability;
+    } else {
+      suitDurability = mode === 'craft' ? 100 : Math.min(100, suitDurability + 55);
+      controller.suitDurability = suitDurability;
+    }
+    syncGearMaterials();
+  };
+
   const restoreState = (state: {
     x: number;
     y: number;
@@ -907,13 +946,18 @@ export function createDrifterCharacter(
     stamina: number;
     staminaExhausted: boolean;
     cold: number;
+    bootsDurability?: number;
+    suitDurability?: number;
     playerName: string;
   }) => {
     root.position.set(state.x, state.y, state.z);
     velocity.set(0, 0, 0);
     verticalVel = 0;
     isGrounded = true;
+    airPeakY = state.y;
     isClimbing = false;
+    isSlipping = false;
+    slipBlend = 0;
     climbSlopeDeg = 0;
     climbBlend = 0;
     yaw = state.yaw;
@@ -923,15 +967,21 @@ export function createDrifterCharacter(
     staminaExhausted = state.staminaExhausted;
     staminaCooldownRemaining = state.staminaExhausted ? 1.5 : 0;
     cold = THREE.MathUtils.clamp(state.cold, 0, 100);
+    bootsDurability = THREE.MathUtils.clamp(state.bootsDurability ?? 100, 0, 100);
+    suitDurability = THREE.MathUtils.clamp(state.suitDurability ?? 100, 0, 100);
+    syncGearMaterials();
     drawNameBadge(state.playerName);
     controller.yaw = yaw;
     controller.isClimbing = false;
+    controller.isSlipping = false;
     controller.climbSlopeDeg = 0;
     controller.health = health;
     controller.stamina = stamina;
     controller.staminaExhausted = staminaExhausted;
     controller.staminaCooldownRemaining = staminaCooldownRemaining;
     controller.cold = cold;
+    controller.bootsDurability = bootsDurability;
+    controller.suitDurability = suitDurability;
     controller.playerName = playerName;
   };
 
@@ -945,6 +995,8 @@ export function createDrifterCharacter(
       stamina: 100,
       staminaExhausted: false,
       cold: 14,
+      bootsDurability: 100,
+      suitDurability: 100,
       playerName,
     });
     setCarriedWeight(0);
@@ -957,9 +1009,11 @@ export function createDrifterCharacter(
     onBridgeLadder: boolean,
     insideBuilding: boolean
   ): FootstepSurface => {
-    if (groundY < SEA_LEVEL + 0.08) return 'surf';
+    if (groundY < SEA_LEVEL + 0.08 || riverInfoAt(x, z).inRiver) return 'surf';
     if (onBridgeLadder || insideBuilding) return 'wood';
-    if (desertRockCoverageAt(x, z, groundY) > 0.45) return 'rock';
+    if (dirtRoadMaskAt(x, z) > 0.35 || desertRockCoverageAt(x, z, groundY) > 0.45) {
+      return 'rock';
+    }
     return 'sand';
   };
 
@@ -973,6 +1027,7 @@ export function createDrifterCharacter(
     isSprinting: false,
     isWading: false,
     isClimbing: false,
+    isSlipping: false,
     climbSlopeDeg: 0,
     health,
     maxHealth,
@@ -981,6 +1036,8 @@ export function createDrifterCharacter(
     staminaExhausted,
     staminaCooldownRemaining,
     cold,
+    bootsDurability,
+    suitDurability,
     insideBuilding: false,
     buildingName: null,
     carriedWeightKg,
@@ -989,10 +1046,11 @@ export function createDrifterCharacter(
     setPlayerName,
     damage,
     applyWormFeeding,
+    repairGear,
     restoreState,
     resetState,
     triggerScan,
-    update: (delta, elapsed, input, colliders, onFootstep) => {
+    update: (delta, elapsed, input, colliders, onFootstep, onFallImpact, onSlip) => {
       const dt = Math.min(delta, 0.05);
 
       // Camera-relative movement direction
@@ -1009,13 +1067,15 @@ export function createDrifterCharacter(
 
       const loadRatio = THREE.MathUtils.clamp(carriedWeightKg / 72, 0, 1.2);
       const coldPenalty = cold >= 70 ? 0.9 : 1.0;
+      const bootsSpeedMult = bootsDurability <= 0 ? 0.82 : bootsDurability < 25 ? 0.92 : 1.0;
       const canSprint = !staminaExhausted && stamina > 1.5;
       const wantsSprint = input.sprint && hasInput && canSprint;
 
-      const walkSpeed = staminaExhausted
-        ? 2.35 * coldPenalty
-        : 3.35 * (1 - loadRatio * 0.22) * coldPenalty;
-      const sprintSpeed = 6.7 * (1 - loadRatio * 0.25) * coldPenalty;
+      const walkSpeed =
+        (staminaExhausted ? 2.35 : 3.35 * (1 - loadRatio * 0.22)) *
+        coldPenalty *
+        bootsSpeedMult;
+      const sprintSpeed = 6.7 * (1 - loadRatio * 0.25) * coldPenalty * bootsSpeedMult;
       const maxSpeed = wantsSprint ? sprintSpeed : walkSpeed;
 
       const targetVx = hasInput ? _moveDir.x * maxSpeed : 0;
@@ -1030,7 +1090,7 @@ export function createDrifterCharacter(
       const actuallySprinting = wantsSprint && horizSpeed > walkSpeed + 0.5;
       controller.isSprinting = actuallySprinting;
 
-      // Apply horizontal velocity, hand-climbing on steep/high slopes, and obstacle/wall collisions
+      // Apply horizontal velocity, hand-climbing, hill slipping, and obstacle/wall collisions
       const prevX = root.position.x;
       const prevZ = root.position.z;
       const prevTerrainY = groundHeightAt(prevX, prevZ);
@@ -1047,6 +1107,7 @@ export function createDrifterCharacter(
       let clingingOnSlope = false;
       const wasClimbing = isClimbing;
       isClimbing = false;
+      isSlipping = false;
       climbSlopeDeg = 0;
 
       if (!onBridgeLadder) {
@@ -1054,74 +1115,114 @@ export function createDrifterCharacter(
         const slopeDeg = Math.round(
           THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(_surfNorm.y, 0, 1)))
         );
+        const rainW = input.rainWeight ?? 0;
+        const snowW = input.snowWeight ?? 0;
+        const roadMask = dirtRoadMaskAt(nextX, nextZ);
+        const wornBootsFactor = 1 - bootsDurability / 100;
+
         // Very steep faces (> ~42 deg) or steep high-altitude ridges (> ~37 deg above 9m) engage hand-climbing
         const isSteepFace =
-          _surfNorm.y < 0.74 || (_surfNorm.y < 0.80 && Math.max(prevTerrainY, nextTerrainY) > 9.0);
+          _surfNorm.y < 0.74 || (_surfNorm.y < 0.8 && Math.max(prevTerrainY, nextTerrainY) > 9.0);
+        // Wet weather, exhaustion, or worn boots lower traction so steep hills can trigger a downhill slip
+        const slipThresholdY =
+          0.77 +
+          rainW * 0.05 +
+          snowW * 0.04 +
+          (staminaExhausted ? 0.04 : 0) +
+          wornBootsFactor * 0.11 -
+          roadMask * 0.055;
 
-        if (isSteepFace) {
-          const nx = _surfNorm.x;
-          const nz = _surfNorm.z;
-          const hLen = Math.hypot(nx, nz);
-          if (hLen > 1e-4) {
-            const downX = nx / hLen;
-            const downZ = nz / hLen;
-            const inputIntoSlope = hasInput ? _moveDir.x * downX + _moveDir.z * downZ : 0;
-            const velIntoSlope = velocity.x * downX + velocity.z * downZ;
-            const pushingUphill = inputIntoSlope < -0.05 || nextTerrainY > prevTerrainY + 0.01;
-            const canGrip = !staminaExhausted && stamina > 1.2;
+        const nx = _surfNorm.x;
+        const nz = _surfNorm.z;
+        const hLen = Math.hypot(nx, nz);
 
-            if (canGrip && (pushingUphill || (wasClimbing && !hasInput))) {
-              isClimbing = true;
-              climbSlopeDeg = slopeDeg;
-              climbWallDirX = -downX;
-              climbWallDirZ = -downZ;
+        if (hLen > 1e-4) {
+          const downX = nx / hLen;
+          const downZ = nz / hLen;
+          const inputIntoSlope = hasInput ? _moveDir.x * downX + _moveDir.z * downZ : 0;
+          const velIntoSlope = velocity.x * downX + velocity.z * downZ;
+          const pushingUphill = inputIntoSlope < -0.05 || nextTerrainY > prevTerrainY + 0.01;
+          const canGrip = !staminaExhausted && stamina > 1.2 && bootsDurability > 8;
 
-              if (hasInput && inputIntoSlope < 0.25) {
-                activeClimbMove = true;
-                // Keep 3D arc-length climbing speed natural (~1.7 - 2.3 m/s) even on near-vertical rock walls
-                const arcScale = THREE.MathUtils.clamp(_surfNorm.y, 0.24, 0.92);
-                const climbEffortSpeed =
-                  2.45 * (1 - loadRatio * 0.24) * coldPenalty * (wantsSprint ? 1.18 : 1.0);
-                velocity.x = THREE.MathUtils.damp(
-                  velocity.x,
-                  _moveDir.x * climbEffortSpeed * arcScale,
-                  10,
-                  dt
-                );
-                velocity.z = THREE.MathUtils.damp(
-                  velocity.z,
-                  _moveDir.z * climbEffortSpeed * arcScale,
-                  10,
-                  dt
-                );
-                nextX = prevX + velocity.x * dt;
-                nextZ = prevZ + velocity.z * dt;
-              } else {
-                // Resting/clinging securely to the cliff face when no movement key is held
-                clingingOnSlope = true;
-                velocity.x *= Math.exp(-14 * dt);
-                velocity.z *= Math.exp(-14 * dt);
-                nextX = prevX + velocity.x * dt;
-                nextZ = prevZ + velocity.z * dt;
-              }
-            } else if (velIntoSlope < 0 || !canGrip) {
-              // Exhausted or sliding down without grip
-              if (velIntoSlope < 0) {
-                velocity.x -= downX * velIntoSlope;
-                velocity.z -= downZ * velIntoSlope;
-              }
+          if (isSteepFace && canGrip && (pushingUphill || (wasClimbing && !hasInput))) {
+            isClimbing = true;
+            climbSlopeDeg = slopeDeg;
+            climbWallDirX = -downX;
+            climbWallDirZ = -downZ;
+
+            if (hasInput && inputIntoSlope < 0.25) {
+              activeClimbMove = true;
+              const arcScale = THREE.MathUtils.clamp(_surfNorm.y, 0.24, 0.92);
+              const climbEffortSpeed =
+                2.45 * (1 - loadRatio * 0.24) * coldPenalty * (wantsSprint ? 1.18 : 1.0);
+              velocity.x = THREE.MathUtils.damp(
+                velocity.x,
+                _moveDir.x * climbEffortSpeed * arcScale,
+                10,
+                dt
+              );
+              velocity.z = THREE.MathUtils.damp(
+                velocity.z,
+                _moveDir.z * climbEffortSpeed * arcScale,
+                10,
+                dt
+              );
               nextX = prevX + velocity.x * dt;
               nextZ = prevZ + velocity.z * dt;
-              if (!canGrip || _surfNorm.y < 0.64) {
-                nextX += downX * (canGrip ? 0.65 : 2.15) * dt;
-                nextZ += downZ * (canGrip ? 0.65 : 2.15) * dt;
-              }
+            } else {
+              clingingOnSlope = true;
+              velocity.x *= Math.exp(-14 * dt);
+              velocity.z *= Math.exp(-14 * dt);
+              nextX = prevX + velocity.x * dt;
+              nextZ = prevZ + velocity.z * dt;
+            }
+          } else if (
+            isGrounded &&
+            !isClimbing &&
+            _surfNorm.y < slipThresholdY &&
+            (inputIntoSlope > -0.04 || !canGrip || bootsDurability < 25 || _surfNorm.y < 0.72)
+          ) {
+            // Downhill hill slip: boots lose purchase and player accelerates downslope
+            isSlipping = true;
+            const slideTarget =
+              (4.9 + (1 - _surfNorm.y) * 11.2) *
+              (1 + wornBootsFactor * 0.36) *
+              (1 + rainW * 0.18);
+            const steerX = hasInput ? _moveDir.x * 1.45 : 0;
+            const steerZ = hasInput ? _moveDir.z * 1.45 : 0;
+            velocity.x = THREE.MathUtils.damp(velocity.x, downX * slideTarget + steerX, 5.5, dt);
+            velocity.z = THREE.MathUtils.damp(velocity.z, downZ * slideTarget + steerZ, 5.5, dt);
+            nextX = prevX + velocity.x * dt;
+            nextZ = prevZ + velocity.z * dt;
+
+            if (elapsed - lastSlipAudio > 0.45) {
+              lastSlipAudio = elapsed;
+              onSlip?.();
+            }
+
+            const slideGroundY = groundHeightAt(nextX, nextZ);
+            if (slideGroundY < prevTerrainY - 0.38 && Math.hypot(velocity.x, velocity.z) > 4.2) {
+              isGrounded = false;
+              verticalVel = -1.2;
+              airPeakY = root.position.y;
+            }
+          } else if (isSteepFace && (velIntoSlope < 0 || !canGrip)) {
+            if (velIntoSlope < 0) {
+              velocity.x -= downX * velIntoSlope;
+              velocity.z -= downZ * velIntoSlope;
+            }
+            nextX = prevX + velocity.x * dt;
+            nextZ = prevZ + velocity.z * dt;
+            if (!canGrip || _surfNorm.y < 0.64) {
+              nextX += downX * (canGrip ? 0.65 : 2.15) * dt;
+              nextZ += downZ * (canGrip ? 0.65 : 2.15) * dt;
             }
           }
         }
       }
 
       controller.isClimbing = isClimbing;
+      controller.isSlipping = isSlipping;
       controller.climbSlopeDeg = climbSlopeDeg;
 
       root.position.x = nextX;
@@ -1156,8 +1257,11 @@ export function createDrifterCharacter(
       if (input.jumpPressed && (isGrounded || isClimbing) && !staminaExhausted && stamina >= 8) {
         verticalVel = (isClimbing ? 4.9 : 5.4) - loadRatio * 0.45;
         isGrounded = false;
+        airPeakY = root.position.y;
         isClimbing = false;
+        isSlipping = false;
         controller.isClimbing = false;
+        controller.isSlipping = false;
         stamina = Math.max(0, stamina - jumpCost);
       }
 
@@ -1198,20 +1302,54 @@ export function createDrifterCharacter(
       controller.staminaExhausted = staminaExhausted;
       controller.staminaCooldownRemaining = staminaCooldownRemaining;
 
-      const wading = groundY < SEA_LEVEL + 0.08;
+      const wading = groundY < SEA_LEVEL + 0.08 || riverInfoAt(root.position.x, root.position.z).inRiver;
       controller.isWading = wading;
 
       const insideBuilding = Boolean(input.insideBuilding);
       controller.insideBuilding = insideBuilding;
       controller.buildingName = input.buildingName ?? null;
 
-      // Cold Feeling / Thermal Exposure Update (drops rapidly inside sheltered buildings, rises mildly at night)
+      // Shoes (Boots) & Clothes (Suit) Durability Wear
+      const stepDist =
+        isGrounded || isClimbing
+          ? Math.hypot(root.position.x - prevX, root.position.z - prevZ)
+          : 0;
+      const roadRelief = 1 - dirtRoadMaskAt(root.position.x, root.position.z) * 0.35;
+      const rockRough =
+        desertRockCoverageAt(root.position.x, root.position.z, groundY) > 0.45 || isClimbing
+          ? 1.5
+          : 1.0;
+      const bootsWear =
+        stepDist *
+        0.048 *
+        rockRough *
+        roadRelief *
+        (1 + loadRatio * 0.45) *
+        (actuallySprinting ? 1.3 : 1.0) *
+        (isSlipping ? 1.8 : 1.0);
+      bootsDurability = Math.max(0, bootsDurability - bootsWear);
+
+      const suitAbrasion = !insideBuilding
+        ? ((input.rainWeight ?? 0) * 0.14 +
+            (input.snowWeight ?? 0) * 0.18 +
+            (wading ? 0.22 : 0) +
+            (activeClimbMove ? 0.24 : 0) +
+            (isSlipping ? 0.45 : 0)) *
+          dt
+        : 0;
+      suitDurability = Math.max(0, suitDurability - suitAbrasion);
+      controller.bootsDurability = bootsDurability;
+      controller.suitDurability = suitDurability;
+      syncGearMaterials();
+
+      // Cold Feeling / Thermal Exposure Update (worn clothes reduce insulation)
       if (insideBuilding) {
         cold = Math.max(0, cold - 18.0 * dt);
         if (cold < 45 && health < maxHealth) {
           health = Math.min(maxHealth, health + 2.2 * dt);
         }
       } else {
+        const suitColdMult = 1 + (1 - suitDurability / 100) * 0.85;
         const snowChill = (input.snowWeight ?? 0) * 2.45;
         const rainChill = (input.rainWeight ?? 0) * 1.15;
         const nightChill = (input.nightWeight ?? 0) * 0.34;
@@ -1219,7 +1357,9 @@ export function createDrifterCharacter(
         const altitudeChill = root.position.y > 5 ? Math.min(1.65, (root.position.y - 5) * 0.11) : 0;
         const exertionWarmth = (actuallySprinting || activeClimbMove) && !wading ? -0.58 : 0;
         const coldRate =
-          0.22 + snowChill + rainChill + nightChill + surfChill + altitudeChill + exertionWarmth;
+          0.22 +
+          (snowChill + rainChill + nightChill + surfChill + altitudeChill) * suitColdMult +
+          exertionWarmth;
         cold = THREE.MathUtils.clamp(cold + coldRate * dt, 0, 100);
         if (cold >= 98) {
           health = Math.max(5, health - 0.8 * dt);
@@ -1228,14 +1368,48 @@ export function createDrifterCharacter(
       controller.cold = cold;
       controller.health = health;
 
+      // Step off steep drop if not gripping/climbing
+      if (isGrounded && !isClimbing && root.position.y - groundY > 0.72) {
+        isGrounded = false;
+        verticalVel = Math.min(verticalVel, -0.8);
+        airPeakY = root.position.y;
+      }
+
       if (!isGrounded) {
         verticalVel -= 15.5 * dt;
         root.position.y += verticalVel * dt;
+        airPeakY = Math.max(airPeakY, root.position.y);
         if (root.position.y <= groundY) {
+          const impactSpeed = Math.abs(verticalVel);
+          const dropHeight = Math.max(0, airPeakY - groundY);
           root.position.y = groundY;
           verticalVel = 0;
           isGrounded = true;
-          landCompression = 0.14;
+
+          if (!onBridgeLadder && (impactSpeed > 8.6 || dropHeight > 2.8)) {
+            const dmg = Math.min(
+              82,
+              Math.round(
+                Math.max(impactSpeed - 8.1, 0) * 5.6 + Math.max(dropHeight - 2.6, 0) * 3.9
+              )
+            );
+            if (dmg > 0) {
+              damage(dmg);
+              landCompression = 0.28;
+              bootsDurability = Math.max(0, bootsDurability - (3.5 + dmg * 0.14));
+              suitDurability = Math.max(0, suitDurability - (2.0 + dmg * 0.11));
+              controller.bootsDurability = bootsDurability;
+              controller.suitDurability = suitDurability;
+              syncGearMaterials();
+              onFallImpact?.({ damage: dmg, impactSpeed, dropHeight });
+            } else {
+              landCompression = 0.14;
+            }
+          } else {
+            landCompression = 0.14;
+          }
+          airPeakY = groundY;
+
           spawnFootprint(root.position.x, root.position.z, yaw, 1);
           spawnFootprint(root.position.x, root.position.z, yaw, -1);
           onFootstep?.({
@@ -1257,6 +1431,7 @@ export function createDrifterCharacter(
           isClimbing ? 28 : 20,
           dt
         );
+        airPeakY = root.position.y;
       }
 
       controller.isGrounded = isGrounded;
@@ -1274,10 +1449,11 @@ export function createDrifterCharacter(
       controller.yaw = yaw;
       root.rotation.y = yaw;
 
-      // Procedural Gait, Hand-Climbing & Articulated Joint Kinematics
+      // Procedural Gait, Hand-Climbing, Slipping & Articulated Joint Kinematics
       const moveWeight = THREE.MathUtils.clamp(horizSpeed / 3.2, 0, 1);
       const sprintBlend = THREE.MathUtils.clamp((horizSpeed - 3.2) / 3.4, 0, 1);
       climbBlend = THREE.MathUtils.damp(climbBlend, isClimbing ? 1 : 0, 11, dt);
+      slipBlend = THREE.MathUtils.damp(slipBlend, isSlipping ? 1 : 0, 12, dt);
 
       if (isClimbing) {
         const climbTravelSpeed = Math.hypot(
@@ -1297,7 +1473,7 @@ export function createDrifterCharacter(
             });
           }
         }
-      } else if (horizSpeed > 0.15 && isGrounded) {
+      } else if (horizSpeed > 0.15 && isGrounded && !isSlipping) {
         const freq = THREE.MathUtils.lerp(5.8, 9.6, sprintBlend);
         stridePhase += dt * freq;
 
@@ -1324,8 +1500,8 @@ export function createDrifterCharacter(
 
       const swing = Math.sin(stridePhase);
       const swingCos = Math.cos(stridePhase);
-      const legAmp = THREE.MathUtils.lerp(0.55, 0.88, sprintBlend) * moveWeight;
-      const armAmp = THREE.MathUtils.lerp(0.45, 0.78, sprintBlend) * moveWeight;
+      const legAmp = THREE.MathUtils.lerp(0.55, 0.88, sprintBlend) * moveWeight * (1 - slipBlend * 0.75);
+      const armAmp = THREE.MathUtils.lerp(0.45, 0.78, sprintBlend) * moveWeight * (1 - slipBlend * 0.75);
 
       const breatheSpeed = staminaExhausted ? 4.4 : isClimbing ? 3.2 : 2.1;
       const breatheAmp = staminaExhausted ? 0.032 : 0.015;
@@ -1333,9 +1509,9 @@ export function createDrifterCharacter(
       const shiver = cold >= 70 && !insideBuilding ? Math.sin(elapsed * 26) * 0.008 * (1 - moveWeight) : 0;
       const idleSway = Math.sin(elapsed * 0.9) * 0.02 * (1 - moveWeight) + shiver;
 
-      const strideBob = Math.abs(swingCos) * 0.045 * moveWeight;
+      const strideBob = Math.abs(swingCos) * 0.045 * moveWeight * (1 - slipBlend);
       const jumpTuck = !isGrounded ? 0.06 : 0;
-      const walkPelvisY = 0.92 - strideBob - landCompression + jumpTuck;
+      const walkPelvisY = 0.92 - strideBob - landCompression + jumpTuck - slipBlend * 0.09;
       const climbBob = Math.abs(Math.cos(climbPhase)) * 0.035 * (activeClimbMove ? 1 : 0);
       pelvis.position.y = THREE.MathUtils.lerp(walkPelvisY, 0.88 + climbBob, climbBlend);
       pelvis.position.z = THREE.MathUtils.lerp(0, -0.09, climbBlend);
@@ -1344,14 +1520,15 @@ export function createDrifterCharacter(
         Math.sin(climbPhase) * 0.08,
         climbBlend
       );
-      pelvis.rotation.z = idleSway * (1 - climbBlend);
+      pelvis.rotation.z = idleSway * (1 - climbBlend) + Math.sin(elapsed * 16) * 0.05 * slipBlend;
 
       const weightLean = loadRatio * 0.13 + (staminaExhausted ? 0.08 : 0);
       const walkTorsoX =
-        THREE.MathUtils.lerp(0.05, 0.22, sprintBlend) * moveWeight +
+        THREE.MathUtils.lerp(0.05, 0.22, sprintBlend) * moveWeight * (1 - slipBlend) +
         weightLean +
         breathe +
-        landCompression * 0.8;
+        landCompression * 0.8 -
+        slipBlend * 0.28;
       const climbTorsoX = 0.34 + breathe * 1.2;
       torso.rotation.x = THREE.MathUtils.lerp(walkTorsoX, climbTorsoX, climbBlend);
       torso.rotation.y = THREE.MathUtils.lerp(
@@ -1420,25 +1597,33 @@ export function createDrifterCharacter(
       const climbElbowL = -0.78 + reachL * 0.36;
       const climbElbowR = -0.78 + reachR * 0.36;
 
-      leftArm.shoulder.rotation.x = THREE.MathUtils.lerp(-swing * armAmp, climbArmL, climbBlend);
-      rightArm.shoulder.rotation.x = THREE.MathUtils.lerp(swing * armAmp, climbArmR, climbBlend);
+      leftArm.shoulder.rotation.x = THREE.MathUtils.lerp(
+        -swing * armAmp - slipBlend * 0.45,
+        climbArmL,
+        climbBlend
+      );
+      rightArm.shoulder.rotation.x = THREE.MathUtils.lerp(
+        swing * armAmp - slipBlend * 0.45,
+        climbArmR,
+        climbBlend
+      );
       leftArm.shoulder.rotation.z = THREE.MathUtils.lerp(
-        0.1 + breathe * 0.6,
+        0.1 + breathe * 0.6 + slipBlend * (0.48 + Math.sin(elapsed * 18) * 0.14),
         0.22 + reachL * 0.08,
         climbBlend
       );
       rightArm.shoulder.rotation.z = THREE.MathUtils.lerp(
-        -0.1 - breathe * 0.6,
+        -0.1 - breathe * 0.6 - slipBlend * (0.48 - Math.sin(elapsed * 18) * 0.14),
         -0.22 - reachR * 0.08,
         climbBlend
       );
       leftArm.elbow.rotation.x = THREE.MathUtils.lerp(
-        -0.25 - Math.max(0, swing) * 0.45 * moveWeight,
+        -0.25 - Math.max(0, swing) * 0.45 * moveWeight - slipBlend * 0.3,
         climbElbowL,
         climbBlend
       );
       rightArm.elbow.rotation.x = THREE.MathUtils.lerp(
-        -0.25 - Math.max(0, -swing) * 0.45 * moveWeight,
+        -0.25 - Math.max(0, -swing) * 0.45 * moveWeight - slipBlend * 0.3,
         climbElbowR,
         climbBlend
       );

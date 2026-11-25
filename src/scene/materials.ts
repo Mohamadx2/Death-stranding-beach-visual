@@ -109,6 +109,7 @@ export interface ProceduralTextureSet {
   desertRockNormal: THREE.CanvasTexture;
   rockAlbedo: THREE.CanvasTexture;
   rockNormal: THREE.CanvasTexture;
+  dirtRoadAlbedo: THREE.CanvasTexture;
   woodAlbedo: THREE.CanvasTexture;
   cargoResinMap: THREE.CanvasTexture;
   cargoBridgesMap: THREE.CanvasTexture;
@@ -781,6 +782,33 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   desertRockNormal.repeat.set(2, 2);
   desertRockNormal.anisotropy = maxAnisotropy;
 
+  // 11. Compacted Ochre-Umber Mountain Dirt Road Gravel Texture
+  const roadSize = 256;
+  const roadCanvas = document.createElement('canvas');
+  roadCanvas.width = roadSize;
+  roadCanvas.height = roadSize;
+  const rdCtx = roadCanvas.getContext('2d')!;
+  const rdImg = rdCtx.createImageData(roadSize, roadSize);
+  for (let y = 0; y < roadSize; y++) {
+    for (let x = 0; x < roadSize; x++) {
+      const i = (y * roadSize + x) * 4;
+      const n = rand();
+      const gravel = (n - 0.5) * 28;
+      const pebble = n > 0.96 ? 26 : n < 0.04 ? -22 : 0;
+      const streak = Math.sin(y * 0.09 + Math.sin(x * 0.05) * 2.0) * 6;
+      rdImg.data[i] = THREE.MathUtils.clamp(118 + gravel + pebble + streak, 48, 178);
+      rdImg.data[i + 1] = THREE.MathUtils.clamp(94 + gravel * 0.85 + pebble + streak * 0.8, 38, 152);
+      rdImg.data[i + 2] = THREE.MathUtils.clamp(68 + gravel * 0.65 + pebble + streak * 0.6, 28, 122);
+      rdImg.data[i + 3] = 255;
+    }
+  }
+  rdCtx.putImageData(rdImg, 0, 0);
+  const dirtRoadAlbedo = new THREE.CanvasTexture(roadCanvas);
+  dirtRoadAlbedo.colorSpace = THREE.SRGBColorSpace;
+  dirtRoadAlbedo.wrapS = THREE.RepeatWrapping;
+  dirtRoadAlbedo.wrapT = THREE.RepeatWrapping;
+  dirtRoadAlbedo.anisotropy = maxAnisotropy;
+
   return {
     sandAlbedo,
     sandNormal,
@@ -792,6 +820,7 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     desertRockNormal,
     rockAlbedo,
     rockNormal,
+    dirtRoadAlbedo,
     woodAlbedo,
     cargoResinMap,
     cargoBridgesMap,
@@ -809,6 +838,7 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       desertRockNormal.dispose();
       rockAlbedo.dispose();
       rockNormal.dispose();
+      dirtRoadAlbedo.dispose();
       woodAlbedo.dispose();
       cargoResinMap.dispose();
       cargoBridgesMap.dispose();

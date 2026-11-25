@@ -3,8 +3,11 @@ import {
   BEACH_PLAYABLE_RADIUS,
   MUSIC_TRIGGER_POINT,
   ObstacleCollider,
+  UMBRELLA_STATIONS,
+  dirtRoadMaskAt,
   groundHeightAt,
   groundNormalAt,
+  riverInfoAt,
   shorelineZAt,
 } from './terrain';
 
@@ -161,13 +164,18 @@ export function createChiralCrystalSystem(
   disposables.push(crystalMat, tarMat);
 
   const nodes: ChiralCrystalNode[] = [];
-  const totalClusters = 28;
+  const totalClusters = 36;
 
   const isSpotClear = (x: number, z: number): boolean => {
     if (Math.hypot(x, z - 18) < 10.5) return false;
     if (Math.hypot(x - 14, z - 36) < 10.5) return false;
     if (Math.hypot(x - MUSIC_TRIGGER_POINT.x, z - MUSIC_TRIGGER_POINT.z) < 7.5) return false;
     if (z < shorelineZAt(x) + 3.0) return false;
+    if (riverInfoAt(x, z).bankMask > 0.15) return false;
+    if (dirtRoadMaskAt(x, z) > 0.2) return false;
+    for (const s of UMBRELLA_STATIONS) {
+      if (Math.hypot(x - s.x, z - s.z) < 5.5) return false;
+    }
     if (groundNormalAt(x, z, _norm).y < 0.72) return false;
     for (const c of colliders) {
       if (Math.hypot(x - c.x, z - c.z) < c.radius + 1.05) return false;

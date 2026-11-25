@@ -16,6 +16,8 @@ export interface GameSaveData {
   stamina: number;
   staminaExhausted: boolean;
   cold: number;
+  bootsDurability?: number;
+  suitDurability?: number;
   wormsInPouch: number;
   preset: AtmospherePresetId;
   weatherMode: WeatherMode;

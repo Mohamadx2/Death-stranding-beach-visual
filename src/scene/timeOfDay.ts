@@ -35,13 +35,6 @@ function normalizeHour(h: number): number {
   return mod < 0 ? mod + 24 : mod;
 }
 
-function shortestHourDelta(fromHour: number, toHour: number): number {
-  let diff = normalizeHour(toHour) - normalizeHour(fromHour);
-  if (diff > 12) diff -= 24;
-  if (diff < -12) diff += 24;
-  return diff;
-}
-
 function formatClock(hour: number): string {
   const hNorm = normalizeHour(hour);
   const hh = Math.floor(hNorm) % 24;
@@ -105,6 +98,9 @@ export function createTimeOfDaySystem(initialHour = 11.2): TimeOfDaySystem {
 
   const setMode = (nextMode: TimeOfDayMode) => {
     mode = nextMode;
+    if (nextMode !== 'auto') {
+      hour = TARGET_HOURS[nextMode];
+    }
   };
 
   const setHour = (nextHour: number) => {
@@ -115,10 +111,6 @@ export function createTimeOfDaySystem(initialHour = 11.2): TimeOfDaySystem {
     const dt = Math.min(delta, 0.05);
     if (mode === 'auto') {
       hour = normalizeHour(hour + dt * AUTO_HOURS_PER_SEC);
-    } else {
-      const target = TARGET_HOURS[mode];
-      const diff = shortestHourDelta(hour, target);
-      hour = normalizeHour(hour + diff * (1 - Math.exp(-3.4 * dt)));
     }
     return buildSnapshot();
   };

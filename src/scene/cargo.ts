@@ -3,8 +3,10 @@ import { ProceduralTextureSet } from './materials';
 import {
   BEACH_PLAYABLE_RADIUS,
   ObstacleCollider,
+  UMBRELLA_STATIONS,
   groundHeightAt,
   groundNormalAt,
+  riverInfoAt,
   shorelineZAt,
 } from './terrain';
 
@@ -388,6 +390,10 @@ export function createCargoSystem(
     if (Math.hypot(x - postX, z - postZ) < 12) return false;
     if (Math.hypot(x, z - 18) < 10) return false;
     if (z < shorelineZAt(x) + 1.5) return false;
+    if (riverInfoAt(x, z).bankMask > 0.15) return false;
+    for (const s of UMBRELLA_STATIONS) {
+      if (Math.hypot(x - s.x, z - s.z) < 5.5) return false;
+    }
     if (groundNormalAt(x, z, _norm).y < 0.8) return false;
     for (const c of colliders) {
       if (Math.hypot(x - c.x, z - c.z) < c.radius + 2.2) return false;

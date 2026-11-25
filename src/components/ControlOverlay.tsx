@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Anchor,
   ChevronDown,
   ChevronUp,
@@ -7,6 +8,7 @@ import {
   Compass,
   Flame,
   FolderOpen,
+  Footprints,
   Hammer,
   Heart,
   LogOut,
@@ -18,6 +20,7 @@ import {
   Radio,
   RotateCcw,
   Save,
+  Shirt,
   Snowflake,
   Sparkles,
   Square,
@@ -25,17 +28,31 @@ import {
   Sunrise,
   ThermometerSnowflake,
   Trash2,
+  Umbrella,
   Upload,
   User,
   Volume2,
   VolumeX,
+  Wrench,
   X,
 } from 'lucide-react';
 import { CameraMode, SceneTelemetry } from '../scene/BeachExperience';
-import { CraftableEquipmentId, EQUIPMENT_COSTS } from '../scene/equipment';
+import {
+  CraftableEquipmentId,
+  EQUIPMENT_COSTS,
+  GEAR_SERVICE_COSTS,
+  GearServiceMode,
+  GearSlot,
+} from '../scene/equipment';
 import { ATMOSPHERE_PRESETS, AtmospherePresetId } from '../scene/materials';
 import { SaveSlotSummary } from '../scene/saveSystem';
-import { shorelineZAt } from '../scene/terrain';
+import {
+  DIRT_ROAD_PATHS,
+  RIVER_PATHS,
+  RUIN_SITES,
+  UMBRELLA_STATIONS,
+  shorelineZAt,
+} from '../scene/terrain';
 import { TimeOfDayMode } from '../scene/timeOfDay';
 import { WeatherMode } from '../scene/weather';
 
@@ -69,6 +86,7 @@ interface ControlOverlayProps {
   onDeployAnchor: () => void;
   onToggleCart: () => void;
   onShiftToCart: () => void;
+  onServiceGear: (slot: GearSlot, mode: GearServiceMode) => void;
   onTouchMove: (x: number, y: number) => void;
   onJump: () => void;
   onOpenMenu: () => void;
@@ -83,7 +101,7 @@ interface ControlOverlayProps {
 
 const MAP_SIZE = 148;
 const MAP_CENTER = MAP_SIZE / 2;
-const MAP_WORLD_SPAN = 310;
+const MAP_WORLD_SPAN = 435;
 const MAP_RADIUS_PX = 64;
 
 function worldToMap(wx: number, wz: number): [number, number] {
@@ -134,6 +152,7 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
   onDeployAnchor,
   onToggleCart,
   onShiftToCart,
+  onServiceGear,
   onTouchMove,
   onJump,
   onOpenMenu,
@@ -219,6 +238,32 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
     return segments.join(' ');
   }, []);
 
+  const riverPathDs = useMemo(
+    () =>
+      RIVER_PATHS.map((river) =>
+        river.points
+          .map(([rx, rz], idx) => {
+            const [mx, my] = worldToMap(rx, rz);
+            return `${idx === 0 ? 'M' : 'L'}${mx.toFixed(1)},${my.toFixed(1)}`;
+          })
+          .join(' ')
+      ),
+    []
+  );
+
+  const dirtRoadPathDs = useMemo(
+    () =>
+      DIRT_ROAD_PATHS.map((road) =>
+        road
+          .map(([rx, rz], idx) => {
+            const [mx, my] = worldToMap(rx, rz);
+            return `${idx === 0 ? 'M' : 'L'}${mx.toFixed(1)},${my.toFixed(1)}`;
+          })
+          .join(' ')
+      ),
+    []
+  );
+
   const { cargo, equipment } = telemetry;
   const showCrystalPrompt =
     telemetry.nearbyCrystalYield !== null &&
@@ -267,6 +312,8 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
   );
   const staminaPct = Math.round(telemetry.stamina);
   const coldPct = Math.round(telemetry.cold);
+  const bootsPct = Math.round(telemetry.bootsDurability);
+  const suitPct = Math.round(telemetry.suitDurability);
 
   return (
     <>
@@ -326,15 +373,29 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
                 </span>
               </div>
 
-              {(equipment.nearAnchorAssist || equipment.onLadder || telemetry.isClimbing) && (
-                <div className="font-mono-tabular text-[11px] text-sky-300">
-                  {equipment.onLadder
-                    ? 'Bridge Ladder'
-                    : telemetry.isClimbing
-                      ? `Hand Climbing ${telemetry.climbSlopeDeg}°${
-                          equipment.nearAnchorAssist ? ' · Anchor Assist' : ''
-                        }`
-                      : 'Anchor Assist'}
+              {(telemetry.isSlipping ||
+                equipment.nearAnchorAssist ||
+                equipment.onLadder ||
+                telemetry.isClimbing) && (
+                <div
+                  className={`font-mono-tabular flex items-center gap-1.5 text-[11px] ${
+                    telemetry.isSlipping ? 'font-medium text-amber-300' : 'text-sky-300'
+                  }`}
+                >
+                  {telemetry.isSlipping ? (
+                    <>
+                      <AlertTriangle className="h-3 w-3 text-amber-300" />
+                      <span>Slipping on Steep Slope!</span>
+                    </>
+                  ) : equipment.onLadder ? (
+                    'Bridge Ladder'
+                  ) : telemetry.isClimbing ? (
+                    `Hand Climbing ${telemetry.climbSlopeDeg}°${
+                      equipment.nearAnchorAssist ? ' · Anchor Assist' : ''
+                    }`
+                  ) : (
+                    'Anchor Assist'
+                  )}
                 </div>
               )}
 
@@ -438,6 +499,61 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
                 }`}
                 style={{ width: `${Math.max(0, Math.min(100, coldPct))}%` }}
               />
+            </div>
+          </div>
+
+          {/* Shoes (Boots) & Clothes (Suit) Durability Bars */}
+          <div className="grid grid-cols-2 gap-2.5 pt-0.5">
+            <div className="flex flex-col gap-0.5">
+              <div className="font-mono-tabular flex items-center justify-between text-[10px]">
+                <span
+                  className={`flex items-center gap-1 ${
+                    bootsPct < 25 ? 'font-medium text-rose-300' : 'text-slate-300'
+                  }`}
+                >
+                  <Footprints className="h-2.5 w-2.5" />
+                  <span>Shoes</span>
+                </span>
+                <span className="text-slate-300">{bootsPct}%</span>
+              </div>
+              <div className="h-1 w-full overflow-hidden rounded-sm bg-white/12">
+                <div
+                  className={`h-full transition-[width] duration-150 ${
+                    bootsPct < 25
+                      ? 'bg-rose-400'
+                      : bootsPct < 55
+                        ? 'bg-amber-300'
+                        : 'bg-emerald-300/85'
+                  }`}
+                  style={{ width: `${Math.max(0, Math.min(100, bootsPct))}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-0.5">
+              <div className="font-mono-tabular flex items-center justify-between text-[10px]">
+                <span
+                  className={`flex items-center gap-1 ${
+                    suitPct < 25 ? 'font-medium text-rose-300' : 'text-slate-300'
+                  }`}
+                >
+                  <Shirt className="h-2.5 w-2.5" />
+                  <span>Clothes</span>
+                </span>
+                <span className="text-slate-300">{suitPct}%</span>
+              </div>
+              <div className="h-1 w-full overflow-hidden rounded-sm bg-white/12">
+                <div
+                  className={`h-full transition-[width] duration-150 ${
+                    suitPct < 25
+                      ? 'bg-rose-400'
+                      : suitPct < 55
+                        ? 'bg-amber-300'
+                        : 'bg-sky-300/85'
+                  }`}
+                  style={{ width: `${Math.max(0, Math.min(100, suitPct))}%` }}
+                />
+              </div>
             </div>
           </div>
 
@@ -549,6 +665,34 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
                   points={oceanPolygonPoints}
                   fill="#1e3344"
                 />
+                {/* Compacted Mountain Dirt Roads */}
+                {dirtRoadPathDs.map((d, idx) => (
+                  <path
+                    key={`road-${idx}`}
+                    d={d}
+                    fill="none"
+                    stroke="#a8845c"
+                    strokeWidth={1.6}
+                    strokeOpacity={0.72}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                ))}
+
+                {/* Tiny Mountain-to-Sea Rivers */}
+                {riverPathDs.map((d, idx) => (
+                  <path
+                    key={`river-${idx}`}
+                    d={d}
+                    fill="none"
+                    stroke="#38bdf8"
+                    strokeWidth={1.5}
+                    strokeOpacity={0.85}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                ))}
+
                 {/* Shoreline foam contour */}
                 <path
                   d={shorelinePathD}
@@ -567,7 +711,7 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
                   strokeOpacity={0.12}
                   strokeDasharray="2 3"
                 />
-                {/* Outer 210m Playable Boundary Wall */}
+                {/* Outer Playable Boundary Wall */}
                 <circle
                   cx={MAP_CENTER}
                   cy={MAP_CENTER}
@@ -577,6 +721,42 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
                   strokeOpacity={telemetry.boundaryHit ? 0.95 : 0.35}
                   strokeWidth={telemetry.boundaryHit ? 1.8 : 1.1}
                 />
+
+                {/* Abandoned Ruined Small Buildings */}
+                {RUIN_SITES.map((ruin) => {
+                  const [rx, ry] = worldToMap(ruin.x, ruin.z);
+                  return (
+                    <rect
+                      key={ruin.id}
+                      x={rx - 2.1}
+                      y={ry - 2.1}
+                      width={4.2}
+                      height={4.2}
+                      fill="#78716c"
+                      fillOpacity={0.8}
+                      stroke="#1c1917"
+                      strokeWidth={0.7}
+                    />
+                  );
+                })}
+
+                {/* Umbrella-Shaped Gear Repair & Crafting Stations */}
+                {UMBRELLA_STATIONS.map((station) => {
+                  const [ux, uy] = worldToMap(station.x, station.z);
+                  return (
+                    <g key={station.id} transform={`translate(${ux}, ${uy})`}>
+                      <circle
+                        cx={0}
+                        cy={0}
+                        r={3.5}
+                        fill="#0f172a"
+                        stroke="#38bdf8"
+                        strokeWidth={1.1}
+                      />
+                      <circle cx={0} cy={0} r={1.3} fill="#7dd3fc" />
+                    </g>
+                  );
+                })}
 
                 {/* Uncollected Cargo Blips */}
                 {cargo.worldCargos.map((c) => {
@@ -732,12 +912,109 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
         )}
       </div>
 
-      {/* Subtle Bottom Action Prompts (Cargo Pickup / Delivery / Invisible Wall) */}
+      {/* Subtle Bottom Action Prompts (Cargo Pickup / Delivery / Fall / Umbrella Station / Wall) */}
       <div className="pointer-events-none flex flex-col items-center gap-2">
+        {telemetry.rescueNotice && (
+          <div className="rounded-md border border-sky-400/50 bg-[#0e1217]/94 px-3.5 py-1.5 text-xs font-medium text-sky-200 shadow-lg">
+            {telemetry.rescueNotice}
+          </div>
+        )}
+
+        {telemetry.lastFallDamage !== null && (
+          <div className="flex items-center gap-1.5 rounded-md border border-rose-400/50 bg-[#181014]/94 px-3.5 py-1.5 text-xs font-semibold text-rose-200 shadow-lg">
+            <AlertTriangle className="h-3.5 w-3.5 text-rose-400" />
+            <span>Hard Fall Impact (-{telemetry.lastFallDamage} HP)</span>
+          </div>
+        )}
+
         {telemetry.boundaryHit && (
           <div className="rounded-md border border-sky-400/40 bg-[#0e1217]/90 px-3.5 py-1.5 text-xs font-medium text-sky-200">
             Perimeter Boundary Reached
           </div>
+        )}
+
+        {/* Umbrella-Shaped Station Gear Repair & Crafting Workbench */}
+        {telemetry.nearbyUmbrellaStation && (
+          <section
+            aria-label="Umbrella Station Gear Workbench"
+            className="pointer-events-auto flex w-full max-w-[540px] flex-col gap-2 rounded-xl border border-sky-400/45 bg-[#0e141c]/94 p-3 shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-white/10 pb-1.5">
+              <div className="flex items-center gap-2 text-xs font-semibold text-sky-200">
+                <Umbrella className="h-4 w-4 text-sky-300" />
+                <span>{telemetry.nearbyUmbrellaStation.name}</span>
+              </div>
+              <span className="font-mono-tabular text-[11px] text-amber-300">
+                {equipment.crystals} cg · [U] Quick Repair
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <button
+                type="button"
+                disabled={
+                  equipment.crystals < GEAR_SERVICE_COSTS.repairBoots || bootsPct >= 100
+                }
+                onClick={() => onServiceGear('boots', 'repair')}
+                className="flex flex-col items-start gap-0.5 rounded-md border border-sky-400/40 bg-sky-500/15 px-2.5 py-1.5 text-left text-[11px] font-medium text-sky-100 transition-colors hover:bg-sky-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <span className="flex items-center gap-1 whitespace-nowrap">
+                  <Wrench className="h-3 w-3 text-sky-300" />
+                  <span>Repair Shoes</span>
+                </span>
+                <span className="font-mono-tabular text-[10px] text-amber-300">
+                  {GEAR_SERVICE_COSTS.repairBoots} cg (+55%)
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={equipment.crystals < GEAR_SERVICE_COSTS.craftBoots}
+                onClick={() => onServiceGear('boots', 'craft')}
+                className="flex flex-col items-start gap-0.5 rounded-md border border-amber-400/40 bg-amber-500/15 px-2.5 py-1.5 text-left text-[11px] font-medium text-amber-100 transition-colors hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <span className="flex items-center gap-1 whitespace-nowrap">
+                  <Footprints className="h-3 w-3 text-amber-300" />
+                  <span>Craft Shoes</span>
+                </span>
+                <span className="font-mono-tabular text-[10px] text-amber-300">
+                  {GEAR_SERVICE_COSTS.craftBoots} cg (100%)
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  equipment.crystals < GEAR_SERVICE_COSTS.repairSuit || suitPct >= 100
+                }
+                onClick={() => onServiceGear('suit', 'repair')}
+                className="flex flex-col items-start gap-0.5 rounded-md border border-sky-400/40 bg-sky-500/15 px-2.5 py-1.5 text-left text-[11px] font-medium text-sky-100 transition-colors hover:bg-sky-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <span className="flex items-center gap-1 whitespace-nowrap">
+                  <Wrench className="h-3 w-3 text-sky-300" />
+                  <span>Repair Clothes</span>
+                </span>
+                <span className="font-mono-tabular text-[10px] text-amber-300">
+                  {GEAR_SERVICE_COSTS.repairSuit} cg (+55%)
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={equipment.crystals < GEAR_SERVICE_COSTS.craftSuit}
+                onClick={() => onServiceGear('suit', 'craft')}
+                className="flex flex-col items-start gap-0.5 rounded-md border border-amber-400/40 bg-amber-500/15 px-2.5 py-1.5 text-left text-[11px] font-medium text-amber-100 transition-colors hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <span className="flex items-center gap-1 whitespace-nowrap">
+                  <Shirt className="h-3 w-3 text-amber-300" />
+                  <span>Craft Clothes</span>
+                </span>
+                <span className="font-mono-tabular text-[10px] text-amber-300">
+                  {GEAR_SERVICE_COSTS.craftSuit} cg (100%)
+                </span>
+              </button>
+            </div>
+          </section>
         )}
 
         {showCrystalPrompt && (
@@ -1307,7 +1584,7 @@ export const ControlOverlay: React.FC<ControlOverlayProps> = ({
 
             {/* Quiet Single-Line Control Legend */}
             <div className="hidden items-center justify-between border-t border-white/8 pt-2 text-[11px] text-slate-400 sm:flex">
-              <span>WASD Move · Shift Sprint · E Collect/Catch · Q Eat Worm · B Craft · 1/2/3 Equip · T Load Cart</span>
+              <span>WASD Move · Shift Sprint · E Collect · Q Eat · B Craft · U Repair at Umbrella · 1/2/3 Equip · T Load Cart</span>
               <span>F Scan · H Hide HUD · Esc Menu</span>
             </div>
           </div>

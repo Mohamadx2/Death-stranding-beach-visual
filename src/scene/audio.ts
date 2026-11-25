@@ -484,6 +484,98 @@ export class BeachAudioEngine {
     osc.stop(now + 0.2);
   }
 
+  public playFallImpact(severity = 0.6): void {
+    if (!this.ctx) {
+      this.ensureInitialized();
+    }
+    if (!this.ctx) return;
+    if (this.ctx.state === 'suspended') {
+      void this.ctx.resume();
+    }
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const clamped = Math.min(1, Math.max(0.25, severity));
+
+    // Heavy low body thump
+    const thudOsc = ctx.createOscillator();
+    thudOsc.type = 'sine';
+    thudOsc.frequency.setValueAtTime(125 + clamped * 35, now);
+    thudOsc.frequency.exponentialRampToValueAtTime(34, now + 0.24);
+    const thudGain = ctx.createGain();
+    thudGain.gain.setValueAtTime(0.001, now);
+    thudGain.gain.linearRampToValueAtTime(0.18 * clamped + 0.06, now + 0.012);
+    thudGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.28);
+    thudOsc.connect(thudGain);
+    thudGain.connect(ctx.destination);
+    thudOsc.start(now);
+    thudOsc.stop(now + 0.3);
+
+    // Loose gravel/sand skid burst on impact
+    if (this.noiseBuffer) {
+      const gritSrc = ctx.createBufferSource();
+      gritSrc.buffer = this.noiseBuffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = 920;
+      filter.Q.value = 0.85;
+      const gGain = ctx.createGain();
+      gGain.gain.setValueAtTime(0.001, now);
+      gGain.gain.linearRampToValueAtTime(0.14 * clamped, now + 0.02);
+      gGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.24);
+      gritSrc.connect(filter);
+      filter.connect(gGain);
+      gGain.connect(ctx.destination);
+      gritSrc.start(now, Math.random() * 1.4, 0.26);
+    }
+  }
+
+  public playSlipScrape(): void {
+    if (!this.enabled || !this.ctx || !this.masterGain || !this.noiseBuffer) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(1400, now);
+    filter.frequency.exponentialRampToValueAtTime(680, now + 0.16);
+    filter.Q.value = 1.2;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.1, now + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    src.start(now, Math.random() * 1.4, 0.2);
+  }
+
+  public playStationRepair(): void {
+    if (!this.ctx) {
+      this.ensureInitialized();
+    }
+    if (!this.ctx) return;
+    if (this.ctx.state === 'suspended') {
+      void this.ctx.resume();
+    }
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const freqs = [330, 495, 660];
+    freqs.forEach((f, idx) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(f, now + idx * 0.055);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0005, now + idx * 0.055);
+      gain.gain.linearRampToValueAtTime(0.085, now + idx * 0.055 + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0005, now + idx * 0.055 + 0.22);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + idx * 0.055);
+      osc.stop(now + idx * 0.055 + 0.24);
+    });
+  }
+
   public setOnMusicStateChange(cb: () => void): void {
     this.onMusicStateChange = cb;
   }

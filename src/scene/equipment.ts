@@ -2,12 +2,21 @@ import * as THREE from 'three';
 import { groundHeightAt, groundNormalAt } from './terrain';
 
 export type CraftableEquipmentId = 'ladder' | 'anchor' | 'cart';
+export type GearSlot = 'boots' | 'suit';
+export type GearServiceMode = 'repair' | 'craft';
 
 export const EQUIPMENT_COSTS: Record<CraftableEquipmentId, number> = {
   ladder: 35,
   anchor: 45,
   cart: 70,
 };
+
+export const GEAR_SERVICE_COSTS = {
+  repairBoots: 10,
+  craftBoots: 25,
+  repairSuit: 15,
+  craftSuit: 35,
+} as const;
 
 export interface DeployedLadder {
   startX: number;
@@ -71,6 +80,7 @@ export interface EquipmentSystem {
   cartCargoMount: THREE.Group;
   getSnapshot: () => EquipmentSnapshot;
   addCrystals: (amount: number) => void;
+  spendCrystals: (amount: number) => boolean;
   craft: (id: CraftableEquipmentId) => boolean;
   deployLadder: (playerPos: THREE.Vector3, playerYaw: number) => boolean;
   deployAnchor: (playerPos: THREE.Vector3, playerYaw: number) => boolean;
@@ -306,6 +316,13 @@ export function createEquipmentSystem(
 
   const addCrystals = (amount: number) => {
     crystals += Math.max(0, amount);
+  };
+
+  const spendCrystals = (amount: number): boolean => {
+    const cost = Math.max(0, amount);
+    if (crystals < cost) return false;
+    crystals -= cost;
+    return true;
   };
 
   const craft = (id: CraftableEquipmentId): boolean => {
@@ -659,6 +676,7 @@ export function createEquipmentSystem(
     cartCargoMount,
     getSnapshot,
     addCrystals,
+    spendCrystals,
     craft,
     deployLadder,
     deployAnchor,

@@ -10,7 +10,11 @@ import {
   CameraMode,
   SceneTelemetry,
 } from './scene/BeachExperience';
-import { CraftableEquipmentId } from './scene/equipment';
+import {
+  CraftableEquipmentId,
+  GearServiceMode,
+  GearSlot,
+} from './scene/equipment';
 import { AtmospherePresetId } from './scene/materials';
 import {
   SaveSlotSummary,
@@ -45,6 +49,7 @@ export default function App() {
     speed: 0,
     isWading: false,
     isClimbing: false,
+    isSlipping: false,
     climbSlopeDeg: 0,
     health: 100,
     maxHealth: 100,
@@ -53,13 +58,18 @@ export default function App() {
     staminaExhausted: false,
     staminaCooldownRemaining: 0,
     cold: 14,
+    bootsDurability: 100,
+    suitDurability: 100,
+    lastFallDamage: null,
+    rescueNotice: null,
     insideBuilding: false,
     buildingName: null,
+    nearbyUmbrellaStation: null,
     wormsInPouch: 0,
     maxWormsInPouch: 5,
     nearbyWorm: false,
     refugeHutPos: { x: -20, z: 128 },
-    playableRadius: 300,
+    playableRadius: 420,
     boundaryHit: false,
     weather: {
       mode: 'auto',
@@ -219,6 +229,10 @@ export default function App() {
     experienceRef.current?.shiftCargoToCart();
   }, []);
 
+  const handleServiceGear = useCallback((slot: GearSlot, mode: GearServiceMode) => {
+    experienceRef.current?.serviceGearAtStation(slot, mode);
+  }, []);
+
   const handleUploadMusic = useCallback((file: File) => {
     void experienceRef.current?.setCustomMusicFile(file);
   }, []);
@@ -326,6 +340,7 @@ export default function App() {
         onDeployAnchor={handleDeployAnchor}
         onToggleCart={handleToggleCart}
         onShiftToCart={handleShiftToCart}
+        onServiceGear={handleServiceGear}
         onTouchMove={handleTouchMove}
         onJump={handleJump}
         onOpenMenu={handleOpenMenu}

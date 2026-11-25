@@ -5,11 +5,19 @@ import {
   ProceduralTextureSet,
 } from './materials';
 import {
+  DIRT_ROAD_PATHS,
   MUSIC_TRIGGER_POINT,
   ObstacleCollider,
+  RIVER_PATHS,
+  RUIN_SITES,
+  RuinSiteSpec,
   SEA_LEVEL,
+  UMBRELLA_STATIONS,
+  UmbrellaStationSpec,
+  dirtRoadMaskAt,
   groundHeightAt,
   groundNormalAt,
+  riverInfoAt,
   shorelineZAt,
 } from './terrain';
 import { TimeOfDaySnapshot } from './timeOfDay';
@@ -21,6 +29,12 @@ export const REFUGE_HUT_POS = { x: -20, z: 128 };
 export interface BuildingShelterInfo {
   inside: boolean;
   buildingName: string | null;
+}
+
+export interface NearbyUmbrellaStation {
+  id: string;
+  name: string;
+  distance: number;
 }
 
 export interface BeachEnvironment {
@@ -50,6 +64,7 @@ export interface BeachEnvironment {
   };
   waterMaterial: THREE.MeshPhysicalMaterial;
   isInsideBuilding: (x: number, z: number) => BuildingShelterInfo;
+  getNearbyUmbrellaStation: (x: number, z: number) => NearbyUmbrellaStation | null;
   triggerBoundaryImpact: (x: number, z: number, nx: number, nz: number) => void;
   applyPreset: (presetId: AtmospherePresetId) => void;
   applyWeather: (weather: WeatherSnapshot) => void;
@@ -214,7 +229,7 @@ export function createBeachEnvironment(
     uSunDir: { value: new THREE.Vector3(-0.35, 0.36, -0.86).normalize() },
   };
 
-  const skyGeo = new THREE.SphereGeometry(780, 32, 24);
+  const skyGeo = new THREE.SphereGeometry(980, 32, 24);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
@@ -340,9 +355,10 @@ export function createBeachEnvironment(
   group.add(skyMesh);
   disposables.push(skyGeo, skyMat);
 
-  // 2. Expanded Volcanic Sand, Coastal Turf & Desert-Rock Mountain Terrain (920m x 920m)
-  const segCount = isSoftwareGl ? 200 : 300;
-  const terrainGeo = new THREE.PlaneGeometry(920, 920, segCount, segCount);
+  // 2. Expanded Volcanic Sand, Coastal Turf, Dirt Roads, Riverbeds & Desert-Rock Mountains (1280m x 1280m)
+  const terrainSpan = 1280;
+  const segCount = isSoftwareGl ? 230 : 340;
+  const terrainGeo = new THREE.PlaneGeometry(terrainSpan, terrainSpan, segCount, segCount);
   terrainGeo.rotateX(-Math.PI / 2);
 
   const posAttr = terrainGeo.attributes.position as THREE.BufferAttribute;
@@ -352,6 +368,30 @@ export function createBeachEnvironment(
     posAttr.setY(i, groundHeightAt(x, z));
   }
   terrainGeo.computeVertexNormals();
+
+  // Bake analytical dirt roads (R), riverbeds (G), and wet riverbanks (B) into a 384x384 DataTexture
+  const maskSize = 384;
+  const maskData = new Uint8Array(maskSize * maskSize * 4);
+  for (let my = 0; my < maskSize; my++) {
+    const wz = (my / (maskSize - 1) - 0.5) * terrainSpan;
+    for (let mx = 0; mx < maskSize; mx++) {
+      const wx = (mx / (maskSize - 1) - 0.5) * terrainSpan;
+      const roadM = dirtRoadMaskAt(wx, wz);
+      const rev = riverInfoAt(wx, wz);
+      const idx = (my * maskSize + mx) * 4;
+      maskData[idx] = Math.round(roadM * 255);
+      maskData[idx + 1] = Math.round(rev.mask * 255);
+      maskData[idx + 2] = Math.round(rev.bankMask * 255);
+      maskData[idx + 3] = 255;
+    }
+  }
+  const worldMaskMap = new THREE.DataTexture(maskData, maskSize, maskSize, THREE.RGBAFormat);
+  worldMaskMap.minFilter = THREE.LinearFilter;
+  worldMaskMap.magFilter = THREE.LinearFilter;
+  worldMaskMap.wrapS = THREE.ClampToEdgeWrapping;
+  worldMaskMap.wrapT = THREE.ClampToEdgeWrapping;
+  worldMaskMap.needsUpdate = true;
+  disposables.push(worldMaskMap);
 
   const terrainMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -372,6 +412,8 @@ export function createBeachEnvironment(
     shader.uniforms.uCobbleMap = { value: textures.cobbleAlbedo };
     shader.uniforms.uRockMap = { value: textures.rockAlbedo };
     shader.uniforms.uDesertRockMap = { value: textures.desertRockAlbedo };
+    shader.uniforms.uDirtRoadMap = { value: textures.dirtRoadAlbedo };
+    shader.uniforms.uWorldMaskMap = { value: worldMaskMap };
     shader.uniforms.uRainWetness = weatherUniforms.uRainWetness;
     shader.uniforms.uSnowAccumulation = weatherUniforms.uSnowAccumulation;
 
@@ -404,13 +446,20 @@ export function createBeachEnvironment(
         uniform sampler2D uCobbleMap;
         uniform sampler2D uRockMap;
         uniform sampler2D uDesertRockMap;
+        uniform sampler2D uDirtRoadMap;
+        uniform sampler2D uWorldMaskMap;
         uniform float uRainWetness;
         uniform float uSnowAccumulation;`
       )
       .replace(
         '#include <roughnessmap_fragment>',
         `#include <roughnessmap_fragment>
-        // Wet volcanic sand near sea level becomes mirror-smooth, cobble hollows stay damp, and rain wets ground
+        vec2 maskUvR = clamp((vTerrainWorldPos.xz + 640.0) / 1280.0, 0.0, 1.0);
+        vec3 wMaskR = texture2D(uWorldMaskMap, maskUvR).rgb;
+        float roadMaskR = wMaskR.r;
+        float riverBedR = wMaskR.g;
+        float riverBankR = wMaskR.b;
+
         float tideSwash = sin(uTime * 0.95 + vTerrainWorldPos.x * 0.06) * 0.16;
         float wetMask = 1.0 - smoothstep(0.05, 0.82 + tideSwash, vTerrainWorldPos.y);
         float puddleNoise = sin(vTerrainWorldPos.x * 0.18 + vTerrainWorldPos.z * 0.14) * 0.5 + 0.5;
@@ -420,15 +469,22 @@ export function createBeachEnvironment(
                           sin(vTerrainWorldPos.x * 0.008 - 0.5) * 13.0;
         float rInland = vTerrainWorldPos.z - estShoreR;
         float hollowDamp = smoothstep(7.0, 22.0, rInland) * (1.0 - smoothstep(1.2, 3.0, vTerrainWorldPos.y));
-        float aridMask = smoothstep(108.0, 192.0, rInland);
+        float aridMask = smoothstep(132.0, 238.0, rInland);
         roughnessFactor = mix(roughnessFactor, 0.93, aridMask * 0.85);
+        roughnessFactor = mix(roughnessFactor, 0.84, roadMaskR * 0.85);
         roughnessFactor = mix(roughnessFactor, 0.42, hollowDamp * 0.55);
-        roughnessFactor = mix(roughnessFactor, 0.13, max(wetMask, rainGloss * 0.85));
+        roughnessFactor = mix(roughnessFactor, 0.13, max(max(wetMask, rainGloss * 0.85), max(riverBedR * 0.95, riverBankR * 0.72)));
         roughnessFactor = mix(roughnessFactor, 0.68, uSnowAccumulation * 0.55);`
       )
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
+        vec2 maskUv = clamp((vTerrainWorldPos.xz + 640.0) / 1280.0, 0.0, 1.0);
+        vec3 worldMasks = texture2D(uWorldMaskMap, maskUv).rgb;
+        float roadMask = worldMasks.r;
+        float riverBedMask = worldMasks.g;
+        float riverBankMask = worldMasks.b;
+
         float wetTint = 1.0 - smoothstep(0.05, 0.85, vTerrainWorldPos.y);
         diffuseColor.rgb *= mix(0.88, 0.42, wetTint);
 
@@ -437,27 +493,38 @@ export function createBeachEnvironment(
                           sin(vTerrainWorldPos.x * 0.008 - 0.5) * 13.0;
         float inlandDist = vTerrainWorldPos.z - estShoreZ;
         float inlandMask = smoothstep(6.0, 24.0, inlandDist);
-        float desertDistMask = smoothstep(108.0, 192.0, inlandDist);
-        float desertElevMask = smoothstep(9.5, 17.5, vTerrainWorldPos.y);
+        float desertDistMask = smoothstep(132.0, 238.0, inlandDist);
+        float desertElevMask = smoothstep(11.0, 21.5, vTerrainWorldPos.y);
         float desertMask = clamp(max(desertDistMask, desertElevMask * 0.85), 0.0, 1.0);
 
-        // Slope & cliff separation (Reference Image 1: steep fractured basalt cliffs vs plush mossy turf tops)
         float slopeMask = smoothstep(0.66, 0.87, vTerrainWorldNormal.y);
         float mossLipMask = smoothstep(0.60, 0.78, vTerrainWorldNormal.y);
 
-        // Wet river cobbles & crevice greens in coastal transitions and damp hollows (Reference Image 3)
+        // Wet river cobbles & crevice greens in coastal transitions, damp hollows & stream banks
         float shoreBand = smoothstep(5.0, 14.0, inlandDist) * (1.0 - smoothstep(18.0, 36.0, inlandDist));
         float lowHollow = smoothstep(8.0, 24.0, inlandDist) * (1.0 - smoothstep(1.3, 3.3, vTerrainWorldPos.y));
         float cobblePatch = smoothstep(0.44, 0.76, sin(vTerrainWorldPos.x * 0.072 + vTerrainWorldPos.z * 0.064) * 0.5 + 0.5);
-        float cobbleMask = clamp((shoreBand * 0.72 + lowHollow * 0.82) * (0.40 + 0.60 * cobblePatch) * (1.0 - desertDistMask * 0.9) * slopeMask, 0.0, 0.82);
+        float cobbleMask = clamp(
+          max(
+            (shoreBand * 0.72 + lowHollow * 0.82) * (0.40 + 0.60 * cobblePatch) * (1.0 - desertDistMask * 0.9) * slopeMask,
+            riverBankMask * 0.92
+          ),
+          0.0,
+          0.92
+        );
         vec3 cobbleCol = texture2D(uCobbleMap, vTerrainWorldPos.xz * 0.48).rgb;
+        cobbleCol *= mix(1.0, 0.58, riverBedMask);
         diffuseColor.rgb = mix(diffuseColor.rgb, cobbleCol, cobbleMask);
 
-        // Expanded lush highland moss & grassy meadow turf (Reference Images 1 & 2)
+        // Expanded lush highland moss & grassy meadow turf
         float patchNoise = sin(vTerrainWorldPos.x * 0.042 + vTerrainWorldPos.z * 0.036) * 0.28 +
                            cos(vTerrainWorldPos.x * 0.095 - vTerrainWorldPos.z * 0.082) * 0.22 +
                            sin(vTerrainWorldPos.x * 0.22 + vTerrainWorldPos.z * 0.19) * 0.12 + 0.68;
-        float greenMask = clamp(inlandMask * (1.0 - desertDistMask * 0.84) * mossLipMask * patchNoise * (1.0 - cobbleMask * 0.68), 0.0, 0.96);
+        float greenMask = clamp(
+          inlandMask * (1.0 - desertDistMask * 0.84) * mossLipMask * patchNoise * (1.0 - cobbleMask * 0.68) * (1.0 - roadMask * 0.88),
+          0.0,
+          0.96
+        );
 
         vec3 mossColA = texture2D(uMossMap, vTerrainWorldPos.xz * 0.095).rgb;
         vec3 mossColB = texture2D(uMossMap, vTerrainWorldPos.xz * 0.034 + vec2(0.37, 0.61)).rgb;
@@ -467,13 +534,12 @@ export function createBeachEnvironment(
         vec3 richGreen = mix(mossColA, mossColB * vec3(0.92, 1.06, 0.82), meadowTone) * microShade;
         diffuseColor.rgb = mix(diffuseColor.rgb, richGreen, greenMask);
 
-        // Steep dark fractured basalt cliffs on steep walls & ridges (Reference Image 1)
-        float cliffMask = clamp(inlandMask * (1.0 - desertMask) * (1.0 - slopeMask) * 1.35, 0.0, 0.94);
+        // Steep dark fractured basalt cliffs on steep walls & ridges
+        float cliffMask = clamp(inlandMask * (1.0 - desertMask) * (1.0 - slopeMask) * 1.35 * (1.0 - roadMask * 0.7), 0.0, 0.94);
         vec3 cliffTex = texture2D(
           uRockMap,
           vec2((vTerrainWorldPos.x + vTerrainWorldPos.z) * 0.11, vTerrainWorldPos.y * 0.23)
         ).rgb;
-        // Subtle moss streaks clinging into vertical basalt cliff crevices
         float cliffMossStreak = smoothstep(0.62, 0.88, sin(vTerrainWorldPos.x * 0.24 + vTerrainWorldPos.z * 0.19) * 0.5 + 0.5) * 0.35;
         vec3 cliffCol = mix(cliffTex * 0.95, richGreen * 0.78, cliffMossStreak);
         diffuseColor.rgb = mix(diffuseColor.rgb, cliffCol, cliffMask);
@@ -488,17 +554,22 @@ export function createBeachEnvironment(
         vec3 desertCol = mix(desertCliff * strataBand * 0.92, desertFlat * 1.04, slopeMask);
         float dustNoise = sin(vTerrainWorldPos.x * 0.06 - vTerrainWorldPos.z * 0.05) * 0.5 + 0.5;
         desertCol = mix(desertCol, vec3(0.58, 0.46, 0.35), slopeMask * dustNoise * 0.32);
-        diffuseColor.rgb = mix(diffuseColor.rgb, desertCol, desertMask);
+        diffuseColor.rgb = mix(diffuseColor.rgb, desertCol, desertMask * (1.0 - riverBankMask * 0.8));
+
+        // Compacted mountain dirt road gravel surface with subtle worn wheel/boot ruts
+        vec3 roadTex = texture2D(uDirtRoadMap, vTerrainWorldPos.xz * 0.28).rgb;
+        float rutRipple = 0.90 + 0.10 * sin(roadMask * 14.0 + vTerrainWorldPos.x * 0.12);
+        diffuseColor.rgb = mix(diffuseColor.rgb, roadTex * rutRipple, roadMask * (1.0 - riverBedMask) * 0.92);
 
         // Dynamic rain darkening on wet ground
         diffuseColor.rgb *= mix(1.0, 0.68, uRainWetness * (1.0 - wetTint * 0.6));
 
-        // Dynamic snow dusting on upward slopes & inland ridges (keeps wet tidal swash dark)
+        // Dynamic snow dusting on upward slopes & inland ridges
         float snowDrift = sin(vTerrainWorldPos.x * 0.09 + vTerrainWorldPos.z * 0.07) * 0.18 +
                           cos(vTerrainWorldPos.x * 0.22 - vTerrainWorldPos.z * 0.19) * 0.12;
         float snowHeightMask = smoothstep(0.45, 2.2, vTerrainWorldPos.y);
         float snowSlopeMask = smoothstep(0.55, 0.88, vTerrainWorldNormal.y + snowDrift);
-        float snowMask = clamp(uSnowAccumulation * snowHeightMask * snowSlopeMask * 1.15, 0.0, 0.88);
+        float snowMask = clamp(uSnowAccumulation * snowHeightMask * snowSlopeMask * 1.15 * (1.0 - riverBedMask * 0.95), 0.0, 0.88);
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.84, 0.88, 0.92), snowMask);`
       )
       .replace(
@@ -523,7 +594,7 @@ export function createBeachEnvironment(
   disposables.push(terrainGeo, terrainMat);
 
   // 3. Rolling Dark Ocean with Shoreline Surf Foam
-  const waterGeo = new THREE.PlaneGeometry(1100, 520, isSoftwareGl ? 100 : 180, isSoftwareGl ? 70 : 110);
+  const waterGeo = new THREE.PlaneGeometry(1450, 620, isSoftwareGl ? 100 : 180, isSoftwareGl ? 70 : 110);
   waterGeo.rotateX(-Math.PI / 2);
 
   const waterMat = new THREE.MeshPhysicalMaterial({
@@ -594,10 +665,131 @@ export function createBeachEnvironment(
   };
 
   const waterMesh = new THREE.Mesh(waterGeo, waterMat);
-  waterMesh.position.set(0, SEA_LEVEL + 0.04, -225);
+  waterMesh.position.set(0, SEA_LEVEL + 0.04, -275);
   waterMesh.receiveShadow = true;
   group.add(waterMesh);
   disposables.push(waterGeo, waterMat);
+
+  // 3b. Flowing Translucent Tiny Mountain-to-Sea Rivers
+  const riverStreamMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uTime: skyUniforms.uTime,
+      uDaylight: skyUniforms.uDaylight,
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying float vSlope;
+      attribute float aSlope;
+      void main() {
+        vUv = uv;
+        vSlope = aSlope;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uDaylight;
+      varying vec2 vUv;
+      varying float vSlope;
+
+      void main() {
+        float flow = vUv.y - uTime * 1.35;
+        float rippleA = sin(flow * 11.0 + vUv.x * 9.0) * 0.5 + 0.5;
+        float rippleB = cos(flow * 17.5 - vUv.x * 13.0) * 0.5 + 0.5;
+        float streak = smoothstep(0.66, 0.96, rippleA * 0.6 + rippleB * 0.4);
+        float bankEdge = 1.0 - smoothstep(0.18, 0.5, abs(vUv.x - 0.5));
+        float rapidsFoam = smoothstep(0.12, 0.45, vSlope) * (0.45 + 0.55 * streak);
+
+        vec3 deepWater = vec3(0.11, 0.24, 0.30) * (0.35 + 0.65 * uDaylight);
+        vec3 foamCol = vec3(0.76, 0.86, 0.90) * (0.4 + 0.6 * uDaylight);
+        vec3 col = mix(deepWater, foamCol, clamp(streak * 0.32 + rapidsFoam * 0.52, 0.0, 0.85));
+
+        float mouthFade = smoothstep(0.0, 0.04, vUv.y) * smoothstep(1.0, 0.95, vUv.y);
+        float alpha = bankEdge * mouthFade * (0.68 + streak * 0.16);
+        if (alpha < 0.02) discard;
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+  });
+  disposables.push(riverStreamMat);
+
+  for (const river of RIVER_PATHS) {
+    const sampleStep = 3.2;
+    const pts: { x: number; y: number; z: number; slope: number; halfW: number }[] = [];
+    let totalLen = 0;
+
+    for (let s = 0; s < river.points.length - 1; s++) {
+      const [ax, az] = river.points[s];
+      const [bx, bz] = river.points[s + 1];
+      const segLen = Math.hypot(bx - ax, bz - az);
+      const steps = Math.max(2, Math.ceil(segLen / sampleStep));
+      for (let k = 0; k < (s === river.points.length - 2 ? steps + 1 : steps); k++) {
+        const t = k / steps;
+        const rx = THREE.MathUtils.lerp(ax, bx, t);
+        const rz = THREE.MathUtils.lerp(az, bz, t);
+        const wobble = Math.sin(rz * 0.11 + rx * 0.07) * 0.32;
+        const px = rx + wobble;
+        const bedY = groundHeightAt(px, rz);
+        const waterY = Math.max(SEA_LEVEL + 0.05, bedY + 0.24);
+        pts.push({ x: px, y: waterY, z: rz, slope: 0, halfW: river.width * 0.6 });
+      }
+    }
+
+    // Enforce monotonic downhill flow height and compute local slope for rapids foam
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i].y > pts[i - 1].y) {
+        pts[i].y = THREE.MathUtils.lerp(pts[i].y, pts[i - 1].y, 0.65);
+      }
+      const dist = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
+      totalLen += dist;
+      pts[i].slope = dist > 0.01 ? Math.max(0, (pts[i - 1].y - pts[i].y) / dist) : 0;
+    }
+
+    const rPos: number[] = [];
+    const rUv: number[] = [];
+    const rSlope: number[] = [];
+    const rIdx: number[] = [];
+    let accum = 0;
+
+    for (let i = 0; i < pts.length; i++) {
+      const prev = pts[Math.max(0, i - 1)];
+      const next = pts[Math.min(pts.length - 1, i + 1)];
+      if (i > 0) accum += Math.hypot(pts[i].x - prev.x, pts[i].z - prev.z);
+
+      const tx = next.x - prev.x;
+      const tz = next.z - prev.z;
+      const tLen = Math.max(1e-4, Math.hypot(tx, tz));
+      const nx = -tz / tLen;
+      const nz = tx / tLen;
+      const hw = pts[i].halfW;
+
+      rPos.push(
+        pts[i].x - nx * hw, pts[i].y, pts[i].z - nz * hw,
+        pts[i].x + nx * hw, pts[i].y, pts[i].z + nz * hw
+      );
+      const vCoord = totalLen > 1 ? accum / 6.5 : i * 0.2;
+      rUv.push(0, vCoord, 1, vCoord);
+      rSlope.push(pts[i].slope, pts[i].slope);
+
+      if (i < pts.length - 1) {
+        const b = i * 2;
+        rIdx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2);
+      }
+    }
+
+    const rGeo = new THREE.BufferGeometry();
+    rGeo.setAttribute('position', new THREE.Float32BufferAttribute(rPos, 3));
+    rGeo.setAttribute('uv', new THREE.Float32BufferAttribute(rUv, 2));
+    rGeo.setAttribute('aSlope', new THREE.Float32BufferAttribute(rSlope, 1));
+    rGeo.setIndex(rIdx);
+    const rMesh = new THREE.Mesh(rGeo, riverStreamMat);
+    rMesh.renderOrder = 2;
+    group.add(rMesh);
+    disposables.push(rGeo);
+  }
 
   // 4. Basalt Rock Material, Moss-Capped Boulder Material & Stranded Whale Material
   const rockMat = new THREE.MeshStandardMaterial({
@@ -762,13 +954,21 @@ export function createBeachEnvironment(
     if (Math.hypot(ox - REFUGE_HUT_POS.x, oz - REFUGE_HUT_POS.z) < 8.5) return false; // Mountain Refuge Hut
     if (Math.hypot(ox - MUSIC_TRIGGER_POINT.x, oz - MUSIC_TRIGGER_POINT.z) < 9.0) return false;
     if (oz < shorelineZAt(ox) - 1.0) return false;
+    if (riverInfoAt(ox, oz).bankMask > 0.14) return false;
+    if (dirtRoadMaskAt(ox, oz) > 0.16) return false;
+    for (const st of UMBRELLA_STATIONS) {
+      if (Math.hypot(ox - st.x, oz - st.z) < 8.0) return false;
+    }
+    for (const rn of RUIN_SITES) {
+      if (Math.hypot(ox - rn.x, oz - rn.z) < 9.0) return false;
+    }
     for (const c of colliders) {
       if (Math.hypot(ox - c.x, oz - c.z) < c.radius + minPad) return false;
     }
     return true;
   };
 
-  // 28 Random Basalt Rock Obstacles across the beach, hollows & hills
+  // Random Basalt & Sandstone Rock Obstacles across the expanded 420m valley & mountain ridges
   let boulderSeed = 1337;
   const nextRand = () => {
     boulderSeed = (boulderSeed * 16807) % 2147483647;
@@ -777,15 +977,15 @@ export function createBeachEnvironment(
 
   const boulderSpots: { x: number; y: number; z: number; scale: number; useDesert: boolean }[] = [];
 
-  for (let i = 0; i < 48; i++) {
+  for (let i = 0; i < 68; i++) {
     let bx = 0;
     let bz = 0;
     let placed = false;
     for (let attempt = 0; attempt < 25; attempt++) {
       const ang = nextRand() * Math.PI * 2;
-      const dist = 16 + nextRand() * 255;
+      const dist = 16 + nextRand() * 355;
       const tx = Math.cos(ang) * dist;
-      const tz = Math.sin(ang) * dist * 0.72 + 45;
+      const tz = Math.sin(ang) * dist * 0.78 + 80;
       if (isObstacleSpotClear(tx, tz, 4.5)) {
         bx = tx;
         bz = tz;
@@ -930,7 +1130,7 @@ export function createBeachEnvironment(
     metalness: 0.08,
     color: 0xffffff,
   });
-  const pebbleCount = 460;
+  const pebbleCount = 620;
   const pebbles = new THREE.InstancedMesh(pebbleGeo, pebbleMat, pebbleCount);
   pebbles.castShadow = !isSoftwareGl;
   pebbles.receiveShadow = true;
@@ -939,9 +1139,9 @@ export function createBeachEnvironment(
   const tint = new THREE.Color();
   for (let i = 0; i < pebbleCount; i++) {
     const angle = (i * 2.39996) % (Math.PI * 2);
-    const radius = 10 + Math.sqrt(i / pebbleCount) * 265;
+    const radius = 10 + Math.sqrt(i / pebbleCount) * 365;
     const px = Math.cos(angle) * radius;
-    const pz = Math.sin(angle) * radius * 0.76 + 44;
+    const pz = Math.sin(angle) * radius * 0.8 + 75;
     const py = groundHeightAt(px, pz);
     const s = 0.45 + ((i * 17) % 100) * 0.014;
     dummy.position.set(px, py + s * 0.14, pz);
@@ -1032,24 +1232,41 @@ export function createBeachEnvironment(
   };
 
   const candidateGrassSpots: { x: number; z: number }[] = [];
-  const totalCandidates = 1350;
+  const totalCandidates = 1750;
   for (let c = 0; c < totalCandidates; c++) {
     const ang = (c * 2.39996) % (Math.PI * 2);
-    const rad = 14 + Math.sqrt(c / totalCandidates) * 182;
+    const rad = 14 + Math.sqrt(c / totalCandidates) * 245;
     const cx = Math.cos(ang) * rad;
-    const cz = Math.sin(ang) * rad * 0.62 + 78;
+    const cz = Math.sin(ang) * rad * 0.68 + 95;
     const shore = shorelineZAt(cx);
     const inlandDist = cz - shore;
-    if (inlandDist < 8 || inlandDist > 188) continue;
+    if (inlandDist < 8 || inlandDist > 235) continue;
+    if (riverInfoAt(cx, cz).mask > 0.08) continue;
+    if (dirtRoadMaskAt(cx, cz) > 0.14) continue;
     if (Math.hypot(cx - WOODEN_POST_POS.x, cz - WOODEN_POST_POS.z) < 4.5) continue;
     if (Math.hypot(cx - REFUGE_HUT_POS.x, cz - REFUGE_HUT_POS.z) < 4.2) continue;
+
+    let nearStruct = false;
+    for (const st of UMBRELLA_STATIONS) {
+      if (Math.hypot(cx - st.x, cz - st.z) < 5.0) {
+        nearStruct = true;
+        break;
+      }
+    }
+    for (const rn of RUIN_SITES) {
+      if (!nearStruct && Math.hypot(cx - rn.x, cz - rn.z) < 4.8) {
+        nearStruct = true;
+        break;
+      }
+    }
+    if (nearStruct) continue;
 
     groundNormalAt(cx, cz, surfNorm);
     if (surfNorm.y < 0.70) continue; // Keep grass on walkable slopes & cliff caps, not vertical cliff faces
     candidateGrassSpots.push({ x: cx, z: cz });
   }
 
-  const clusterCount = Math.min(920, candidateGrassSpots.length);
+  const clusterCount = Math.min(1150, candidateGrassSpots.length);
   const tuftsPerCluster = 5;
   const totalTufts = clusterCount * tuftsPerCluster;
   const grassMesh = new THREE.InstancedMesh(grassGeo, grassMat, totalTufts);
@@ -1398,6 +1615,343 @@ export function createBeachEnvironment(
     { x: hx - 1.18, z: hz + 1.08, radius: 0.36 }
   );
 
+  // 7e. Dirt Road Trail Cairn Markers Leading Up to High Mountains
+  const markerPostGeo = new THREE.CylinderGeometry(0.055, 0.07, 1.15, 7);
+  const markerGlowGeo = new THREE.BoxGeometry(0.11, 0.16, 0.11);
+  const markerPostMat = new THREE.MeshStandardMaterial({
+    map: textures.woodAlbedo,
+    color: 0x7b6e61,
+    roughness: 0.9,
+    metalness: 0.05,
+  });
+  const markerGlowMat = new THREE.MeshStandardMaterial({
+    color: 0xffc663,
+    emissive: 0xe68a1c,
+    emissiveIntensity: 1.45,
+    roughness: 0.3,
+  });
+  disposables.push(markerPostGeo, markerGlowGeo, markerPostMat, markerGlowMat);
+
+  for (let pIdx = 0; pIdx < DIRT_ROAD_PATHS.length; pIdx++) {
+    const path = DIRT_ROAD_PATHS[pIdx];
+    for (let s = 0; s < path.length - 1; s++) {
+      const [ax, az] = path[s];
+      const [bx, bz] = path[s + 1];
+      const segLen = Math.hypot(bx - ax, bz - az);
+      const nx = -(bz - az) / Math.max(1e-4, segLen);
+      const nz = (bx - ax) / Math.max(1e-4, segLen);
+      const side = (s + pIdx) % 2 === 0 ? 1 : -1;
+      const mx = (ax + bx) * 0.5 + nx * 2.4 * side;
+      const mz = (az + bz) * 0.5 + nz * 2.4 * side;
+      if (riverInfoAt(mx, mz).bankMask > 0.12) continue;
+      const my = groundHeightAt(mx, mz);
+      const post = new THREE.Mesh(markerPostGeo, markerPostMat);
+      post.position.set(mx, my + 0.52, mz);
+      post.rotation.z = side * -0.06;
+      post.castShadow = !isSoftwareGl;
+      const tip = new THREE.Mesh(markerGlowGeo, markerGlowMat);
+      tip.position.set(mx, my + 1.05, mz);
+      group.add(post, tip);
+      colliders.push({ x: mx, z: mz, radius: 0.22 });
+    }
+  }
+
+  // 7f. Abandoned Destroyed Ruined Small Buildings (weathered concrete, collapsed rafters & rusted sheets)
+  const ruinConcreteMat = new THREE.MeshStandardMaterial({
+    map: textures.rockAlbedo,
+    normalMap: textures.rockNormal,
+    color: 0x6f7377,
+    roughness: 0.92,
+    metalness: 0.04,
+  });
+  const ruinRustMat = new THREE.MeshStandardMaterial({
+    color: 0x5c3e2e,
+    roughness: 0.78,
+    metalness: 0.48,
+  });
+  const ruinCharredWoodMat = new THREE.MeshStandardMaterial({
+    map: textures.woodAlbedo,
+    color: 0x574c43,
+    roughness: 0.94,
+    metalness: 0.02,
+  });
+  disposables.push(ruinConcreteMat, ruinRustMat, ruinCharredWoodMat);
+
+  const slabGeo = new THREE.BoxGeometry(5.2, 0.28, 4.4);
+  const wallHalfGeo = new THREE.BoxGeometry(2.3, 1.55, 0.24);
+  const wallSideGeo = new THREE.BoxGeometry(0.24, 1.85, 3.8);
+  const brokenCornerGeo = new THREE.BoxGeometry(1.4, 2.25, 0.24);
+  const rafterGeo = new THREE.BoxGeometry(0.14, 0.16, 4.6);
+  const roofSheetGeo = new THREE.BoxGeometry(2.6, 0.06, 3.4);
+  const rubbleBlockGeo = new THREE.DodecahedronGeometry(0.42, 0);
+  disposables.push(
+    slabGeo,
+    wallHalfGeo,
+    wallSideGeo,
+    brokenCornerGeo,
+    rafterGeo,
+    roofSheetGeo,
+    rubbleBlockGeo
+  );
+
+  const buildRuinedBuilding = (site: RuinSiteSpec) => {
+    const ruin = new THREE.Group();
+    const ry = groundHeightAt(site.x, site.z);
+    ruin.position.set(site.x, ry, site.z);
+    ruin.rotation.y = site.rotY;
+    ruin.scale.setScalar(site.scale);
+
+    const slab = new THREE.Mesh(slabGeo, ruinConcreteMat);
+    slab.position.y = 0.05;
+    slab.receiveShadow = true;
+    ruin.add(slab);
+
+    // Crumbled back & side masonry walls with jagged broken gaps
+    const backL = new THREE.Mesh(wallHalfGeo, ruinConcreteMat);
+    backL.position.set(-1.35, 0.85, 2.02);
+    backL.rotation.z = 0.05;
+    backL.castShadow = !isSoftwareGl;
+    backL.receiveShadow = true;
+    ruin.add(backL);
+
+    const backR = new THREE.Mesh(brokenCornerGeo, ruinConcreteMat);
+    backR.position.set(1.65, 1.15, 2.02);
+    backR.rotation.z = -0.07;
+    backR.castShadow = !isSoftwareGl;
+    backR.receiveShadow = true;
+    ruin.add(backR);
+
+    const leftWall = new THREE.Mesh(wallSideGeo, ruinConcreteMat);
+    leftWall.position.set(-2.45, 0.96, 0.1);
+    leftWall.rotation.x = 0.04;
+    leftWall.castShadow = !isSoftwareGl;
+    leftWall.receiveShadow = true;
+    ruin.add(leftWall);
+
+    const rightStump = new THREE.Mesh(wallHalfGeo, ruinConcreteMat);
+    rightStump.position.set(2.45, 0.56, 0.5);
+    rightStump.rotation.y = Math.PI / 2;
+    rightStump.scale.set(0.9, 0.65, 1);
+    rightStump.castShadow = !isSoftwareGl;
+    ruin.add(rightStump);
+
+    // Collapsed rafters & buckled corrugated iron roof sheet angled onto the floor
+    const beam1 = new THREE.Mesh(rafterGeo, ruinCharredWoodMat);
+    beam1.position.set(-1.05, 1.55, 0.15);
+    beam1.rotation.set(0.28, 0.12, -0.34);
+    beam1.castShadow = !isSoftwareGl;
+    const beam2 = new THREE.Mesh(rafterGeo, ruinCharredWoodMat);
+    beam2.position.set(0.85, 1.32, 0.35);
+    beam2.rotation.set(-0.22, -0.18, 0.42);
+    beam2.castShadow = !isSoftwareGl;
+    ruin.add(beam1, beam2);
+
+    const sheet = new THREE.Mesh(roofSheetGeo, ruinRustMat);
+    sheet.position.set(-0.75, 1.48, 0.38);
+    sheet.rotation.set(0.24, 0.09, -0.44);
+    sheet.castShadow = !isSoftwareGl;
+    sheet.receiveShadow = true;
+    ruin.add(sheet);
+
+    const fallenSheet = new THREE.Mesh(roofSheetGeo, ruinRustMat);
+    fallenSheet.position.set(1.45, 0.25, -1.65);
+    fallenSheet.rotation.set(-0.12, 0.52, 0.08);
+    fallenSheet.scale.set(0.82, 1, 0.72);
+    fallenSheet.receiveShadow = true;
+    ruin.add(fallenSheet);
+
+    // Scattered masonry rubble chunks inside & around ruin
+    const rubbleCoords = [
+      { x: -1.4, z: -1.2, s: 1.0 },
+      { x: 0.4, z: 1.4, s: 1.25 },
+      { x: 1.9, z: -0.6, s: 0.85 },
+      { x: -2.8, z: -1.4, s: 1.1 },
+      { x: 2.3, z: 1.9, s: 0.95 },
+    ];
+    for (let rb = 0; rb < rubbleCoords.length; rb++) {
+      const rc = rubbleCoords[rb];
+      const chunk = new THREE.Mesh(rubbleBlockGeo, ruinConcreteMat);
+      chunk.position.set(rc.x, 0.22 * rc.s, rc.z);
+      chunk.rotation.set(rb * 1.1, rb * 2.1, rb * 0.7);
+      chunk.scale.set(rc.s * 1.2, rc.s * 0.65, rc.s);
+      chunk.castShadow = !isSoftwareGl;
+      chunk.receiveShadow = true;
+      ruin.add(chunk);
+    }
+
+    group.add(ruin);
+
+    // Register solid wall colliders transformed into world space while leaving front collapsed entry open
+    const cosR = Math.cos(site.rotY);
+    const sinR = Math.sin(site.rotY);
+    const wallPts: [number, number, number][] = [
+      [-2.45, -1.0, 0.55],
+      [-2.45, 0.4, 0.55],
+      [-2.45, 1.75, 0.55],
+      [-1.1, 2.02, 0.55],
+      [0.45, 2.02, 0.55],
+      [1.75, 2.02, 0.55],
+      [2.45, 0.8, 0.55],
+    ];
+    for (const [lx, lz, rad] of wallPts) {
+      const wx = site.x + (lx * cosR + lz * sinR) * site.scale;
+      const wz = site.z + (-lx * sinR + lz * cosR) * site.scale;
+      colliders.push({ x: wx, z: wz, radius: rad * site.scale });
+    }
+  };
+
+  for (const site of RUIN_SITES) {
+    buildRuinedBuilding(site);
+  }
+
+  // 7g. Umbrella-Shaped Porter Shelter & Gear Repair Stations Around the Map
+  const umbBaseMat = new THREE.MeshStandardMaterial({
+    color: 0x242a32,
+    roughness: 0.55,
+    metalness: 0.62,
+  });
+  const umbSteelMat = new THREE.MeshStandardMaterial({
+    color: 0x8d99a6,
+    roughness: 0.32,
+    metalness: 0.82,
+  });
+  const umbCanopyMat = new THREE.MeshPhysicalMaterial({
+    color: 0x2d4d63,
+    roughness: 0.24,
+    metalness: 0.14,
+    clearcoat: 0.85,
+    transparent: true,
+    opacity: 0.82,
+    side: THREE.DoubleSide,
+  });
+  const umbGlowMat = new THREE.MeshStandardMaterial({
+    color: 0x7ae2ff,
+    emissive: 0x35b6f0,
+    emissiveIntensity: 1.85,
+    roughness: 0.25,
+  });
+  const umbAmberMat = new THREE.MeshStandardMaterial({
+    color: 0xffc663,
+    emissive: 0xf59e24,
+    emissiveIntensity: 1.75,
+    roughness: 0.28,
+  });
+  disposables.push(umbBaseMat, umbSteelMat, umbCanopyMat, umbGlowMat, umbAmberMat);
+
+  const umbDeckGeo = new THREE.CylinderGeometry(2.5, 2.8, 0.22, 8);
+  const umbPylonGeo = new THREE.CylinderGeometry(0.22, 0.3, 3.65, 10);
+  const umbCollarGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.24, 10);
+  const umbDomeGeo = new THREE.ConeGeometry(4.35, 1.15, 8, 1, true);
+  const umbRibGeo = new THREE.BoxGeometry(0.08, 0.08, 4.45);
+  const umbTipGeo = new THREE.SphereGeometry(0.11, 8, 6);
+  const umbKioskGeo = new THREE.BoxGeometry(0.54, 1.35, 0.42);
+  const umbScreenGeo = new THREE.BoxGeometry(0.42, 0.34, 0.04);
+  const umbRingGeo = new THREE.RingGeometry(4.05, 4.25, 36);
+  umbRingGeo.rotateX(-Math.PI / 2);
+  const umbRingMat = new THREE.MeshBasicMaterial({
+    color: 0x5ccfff,
+    transparent: true,
+    opacity: 0.32,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  disposables.push(
+    umbDeckGeo,
+    umbPylonGeo,
+    umbCollarGeo,
+    umbDomeGeo,
+    umbRibGeo,
+    umbTipGeo,
+    umbKioskGeo,
+    umbScreenGeo,
+    umbRingGeo,
+    umbRingMat
+  );
+
+  const stationLights: THREE.PointLight[] = [];
+
+  const buildUmbrellaStation = (station: UmbrellaStationSpec) => {
+    const st = new THREE.Group();
+    const sy = groundHeightAt(station.x, station.z);
+    st.position.set(station.x, sy, station.z);
+
+    const deck = new THREE.Mesh(umbDeckGeo, umbBaseMat);
+    deck.position.y = 0.06;
+    deck.receiveShadow = true;
+    st.add(deck);
+
+    const pylon = new THREE.Mesh(umbPylonGeo, umbSteelMat);
+    pylon.position.y = 1.92;
+    pylon.castShadow = !isSoftwareGl;
+    st.add(pylon);
+
+    const collar = new THREE.Mesh(umbCollarGeo, umbGlowMat);
+    collar.position.y = 2.65;
+    st.add(collar);
+
+    const finial = new THREE.Mesh(umbTipGeo, umbAmberMat);
+    finial.position.y = 4.22;
+    st.add(finial);
+
+    // Translucent Umbrella Canopy Shell
+    const canopy = new THREE.Mesh(umbDomeGeo, umbCanopyMat);
+    canopy.position.y = 3.55;
+    canopy.rotation.y = Math.PI / 8;
+    canopy.castShadow = !isSoftwareGl;
+    st.add(canopy);
+
+    // 8 Radial Umbrella Ribs + Glowing Rim Nodes
+    for (let r = 0; r < 8; r++) {
+      const ang = (r / 8) * Math.PI * 2 + Math.PI / 8;
+      const ribPivot = new THREE.Group();
+      ribPivot.position.set(0, 3.85, 0);
+      ribPivot.rotation.y = ang;
+
+      const rib = new THREE.Mesh(umbRibGeo, umbSteelMat);
+      rib.position.set(0, -0.42, 2.08);
+      rib.rotation.x = 0.25;
+      ribPivot.add(rib);
+
+      const tip = new THREE.Mesh(umbTipGeo, r % 2 === 0 ? umbGlowMat : umbAmberMat);
+      tip.position.set(0, -0.95, 4.18);
+      ribPivot.add(tip);
+
+      st.add(ribPivot);
+    }
+
+    // Workbench Repair & Fabrication Terminal Kiosk next to pylon
+    const kiosk = new THREE.Mesh(umbKioskGeo, umbBaseMat);
+    kiosk.position.set(0.95, 0.82, 0.65);
+    kiosk.rotation.y = -0.6;
+    kiosk.castShadow = !isSoftwareGl;
+    st.add(kiosk);
+
+    const screen = new THREE.Mesh(umbScreenGeo, umbGlowMat);
+    screen.position.set(0.84, 1.24, 0.48);
+    screen.rotation.set(-0.42, -0.6, 0);
+    st.add(screen);
+
+    const zoneRing = new THREE.Mesh(umbRingGeo, umbRingMat);
+    zoneRing.position.y = 0.18;
+    st.add(zoneRing);
+
+    const stLight = new THREE.PointLight(0x70d2ff, 2.2, 13, 1.5);
+    stLight.position.set(0, 2.85, 0);
+    st.add(stLight);
+    stationLights.push(stLight);
+
+    group.add(st);
+
+    colliders.push(
+      { x: station.x, z: station.z, radius: 0.48 },
+      { x: station.x + 0.95, z: station.z + 0.65, radius: 0.4 }
+    );
+  };
+
+  for (const station of UMBRELLA_STATIONS) {
+    buildUmbrellaStation(station);
+  }
+
   // 8. Distant Misty Volcanic Headlands, Jagged Sea Island & Glacial Drift
   const headlandMat = new THREE.MeshStandardMaterial({
     color: 0x394048,
@@ -1413,51 +1967,51 @@ export function createBeachEnvironment(
 
   // Left sloping headland ridge across the bay
   const leftRidgeGroup = new THREE.Group();
-  const leftPeakGeo = new THREE.ConeGeometry(48, 34, 7);
+  const leftPeakGeo = new THREE.ConeGeometry(54, 38, 7);
   leftPeakGeo.scale(1.8, 1.0, 1.1);
   const leftPeak = new THREE.Mesh(leftPeakGeo, headlandMat);
-  leftPeak.position.set(-135, 11, -185);
+  leftPeak.position.set(-165, 11, -225);
   leftRidgeGroup.add(leftPeak);
 
-  const leftSlopeGeo = new THREE.ConeGeometry(42, 18, 6);
+  const leftSlopeGeo = new THREE.ConeGeometry(48, 22, 6);
   leftSlopeGeo.scale(2.1, 0.9, 1.0);
   const leftSlope = new THREE.Mesh(leftSlopeGeo, headlandMat);
-  leftSlope.position.set(-85, 5, -172);
+  leftSlope.position.set(-105, 5, -205);
   leftRidgeGroup.add(leftSlope);
   group.add(leftRidgeGroup);
   disposables.push(leftPeakGeo, leftSlopeGeo);
 
   // Right jagged sea stack island silhouette
   const rightIslandGroup = new THREE.Group();
-  const rPeak1Geo = new THREE.ConeGeometry(28, 32, 6);
+  const rPeak1Geo = new THREE.ConeGeometry(34, 38, 6);
   rPeak1Geo.scale(1.4, 1.1, 0.9);
   const rPeak1 = new THREE.Mesh(rPeak1Geo, headlandMat);
-  rPeak1.position.set(105, 11, -175);
+  rPeak1.position.set(135, 12, -215);
   rPeak1.rotation.z = -0.22;
   rightIslandGroup.add(rPeak1);
 
-  const rPeak2Geo = new THREE.ConeGeometry(22, 20, 5);
+  const rPeak2Geo = new THREE.ConeGeometry(28, 24, 5);
   rPeak2Geo.scale(1.8, 0.9, 1.0);
   const rPeak2 = new THREE.Mesh(rPeak2Geo, headlandMat);
-  rPeak2.position.set(132, 6, -182);
+  rPeak2.position.set(168, 6, -225);
   rightIslandGroup.add(rPeak2);
   group.add(rightIslandGroup);
   disposables.push(rPeak1Geo, rPeak2Geo);
 
-  // Inland Desert Sandstone Mountain Peaks Framing the Southern Horizon
+  // Inland Desert Sandstone Mountain Peaks Framing the Expanded Southern Horizon
   const desertMountainGroup = new THREE.Group();
-  const mtnPeakGeo = new THREE.ConeGeometry(62, 68, 7);
+  const mtnPeakGeo = new THREE.ConeGeometry(78, 86, 7);
   disposables.push(mtnPeakGeo);
   const desertPeaks = [
-    { x: -245, z: 325, sx: 1.8, sy: 1.05, sz: 1.2 },
-    { x: -115, z: 365, sx: 2.1, sy: 1.28, sz: 1.4 },
-    { x: 15, z: 382, sx: 2.3, sy: 1.35, sz: 1.3 },
-    { x: 145, z: 358, sx: 1.9, sy: 1.18, sz: 1.2 },
-    { x: 265, z: 315, sx: 1.7, sy: 0.98, sz: 1.3 },
+    { x: -340, z: 435, sx: 1.9, sy: 1.05, sz: 1.3 },
+    { x: -165, z: 485, sx: 2.2, sy: 1.3, sz: 1.4 },
+    { x: 18, z: 505, sx: 2.4, sy: 1.4, sz: 1.35 },
+    { x: 195, z: 478, sx: 2.0, sy: 1.22, sz: 1.25 },
+    { x: 355, z: 420, sx: 1.8, sy: 1.02, sz: 1.3 },
   ];
   for (const mp of desertPeaks) {
     const peak = new THREE.Mesh(mtnPeakGeo, desertRockMat);
-    peak.position.set(mp.x, groundHeightAt(mp.x, mp.z) + 12, mp.z);
+    peak.position.set(mp.x, groundHeightAt(mp.x, mp.z) + 14, mp.z);
     peak.scale.set(mp.sx, mp.sy, mp.sz);
     peak.rotation.y = mp.x * 0.05;
     desertMountainGroup.add(peak);
@@ -1653,10 +2207,16 @@ export function createBeachEnvironment(
       waterMat.userData.shader.uniforms.uWaterShallow.value.copy(waterShallowCol);
     }
 
-    // Subtle ash particles & warm refuge cabin stove glow brighter at night
+    // Subtle ash particles & warm refuge/station lights glow brighter at night
     pMat.opacity = 0.42 * (0.35 + clearW * 0.65) * (0.5 + 0.5 * daylight);
     hutWarmLight.intensity = 2.6 + nightW * 2.3;
     emberGlowMat.emissiveIntensity = 2.2 + nightW * 1.4;
+    for (let i = 0; i < stationLights.length; i++) {
+      stationLights[i].intensity = 2.2 + nightW * 2.4;
+    }
+    umbGlowMat.emissiveIntensity = 1.6 + nightW * 1.2;
+    umbAmberMat.emissiveIntensity = 1.5 + nightW * 1.2;
+    markerGlowMat.emissiveIntensity = 1.2 + nightW * 1.6;
   };
 
   const applyPreset = (presetId: AtmospherePresetId) => {
@@ -1716,6 +2276,19 @@ export function createBeachEnvironment(
     pGeo.attributes.position.needsUpdate = true;
   };
 
+  const getNearbyUmbrellaStation = (x: number, z: number): NearbyUmbrellaStation | null => {
+    let best: NearbyUmbrellaStation | null = null;
+    let bestDist = Infinity;
+    for (const s of UMBRELLA_STATIONS) {
+      const d = Math.hypot(x - s.x, z - s.z);
+      if (d <= s.radius && d < bestDist) {
+        bestDist = d;
+        best = { id: s.id, name: s.name, distance: d };
+      }
+    }
+    return best;
+  };
+
   const isInsideBuilding = (x: number, z: number): BuildingShelterInfo => {
     if (
       Math.abs(x - WOODEN_POST_POS.x) <= 2.35 &&
@@ -1728,6 +2301,10 @@ export function createBeachEnvironment(
       Math.abs(z - REFUGE_HUT_POS.z) <= 1.85
     ) {
       return { inside: true, buildingName: 'Mountain Refuge' };
+    }
+    const umb = getNearbyUmbrellaStation(x, z);
+    if (umb) {
+      return { inside: true, buildingName: umb.name };
     }
     return { inside: false, buildingName: null };
   };
@@ -1745,6 +2322,7 @@ export function createBeachEnvironment(
     scanUniforms,
     waterMaterial: waterMat,
     isInsideBuilding,
+    getNearbyUmbrellaStation,
     triggerBoundaryImpact,
     applyPreset,
     applyWeather,
